@@ -1,26 +1,369 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Class-based dark mode (theme is set on <html> by ThemeProvider),
+   otherwise Tailwind 4's dark: variant follows the OS preference and
+   mismatches the in-app theme picker. All themes except "light" are dark,
+   so dark: variants must apply on every dark theme class. */
+@custom-variant dark (&:where(.dark, .midnight, .ocean, .forest, .sunset, .dark *, .midnight *, .ocean *, .forest *, .sunset *));
+
+html.dark, html.light, html.midnight, html.ocean, html.forest, html.sunset {
+  color-scheme: dark;
+}
+html.light {
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* ─── Dark Theme (default) ─── */
+html.dark {
+  --background: #0a0a0f;
+  --foreground: #e4e4e7;
+  --card: #111118;
+  --card-border: #1e1e2a;
+  --card-hover: #18181f;
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --muted: #71717a;
+  --accent: #8b5cf6;
+  --input-bg: rgba(15, 15, 20, 0.5);
+  --input-border: rgba(63, 63, 70, 0.5);
+  --sidebar-bg: #0d0d14;
+  --header-bg: rgba(10, 10, 15, 0.8);
+  --table-row-hover: rgba(255, 255, 255, 0.02);
+  --grid-stroke: #1e1e2a;
+  --scrollbar-thumb: #333;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ─── Light Theme ─── */
+html.light {
+  --background: #f8f9fc;
+  --foreground: #1a1a2e;
+  --card: #ffffff;
+  --card-border: #e2e8f0;
+  --card-hover: #f1f5f9;
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --success: #16a34a;
+  --danger: #dc2626;
+  --warning: #d97706;
+  --muted: #64748b;
+  --accent: #7c3aed;
+  --input-bg: #f1f5f9;
+  --input-border: #cbd5e1;
+  --sidebar-bg: #ffffff;
+  --header-bg: rgba(255, 255, 255, 0.85);
+  --table-row-hover: rgba(0, 0, 0, 0.02);
+  --grid-stroke: #e2e8f0;
+  --scrollbar-thumb: #cbd5e1;
+}
+
+/* ─── Midnight Theme ─── */
+html.midnight {
+  --background: #050510;
+  --foreground: #d4d4e0;
+  --card: #0a0a1a;
+  --card-border: #151530;
+  --card-hover: #0f0f25;
+  --primary: #7c5cff;
+  --primary-hover: #9b7fff;
+  --success: #34d399;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --muted: #5a5a80;
+  --accent: #a78bfa;
+  --input-bg: rgba(10, 10, 30, 0.6);
+  --input-border: rgba(80, 80, 140, 0.3);
+  --sidebar-bg: #070715;
+  --header-bg: rgba(5, 5, 16, 0.9);
+  --table-row-hover: rgba(124, 92, 255, 0.05);
+  --grid-stroke: #151530;
+  --scrollbar-thumb: #2a2a50;
+}
+
+/* ─── Ocean Theme ─── */
+html.ocean {
+  --background: #0a1628;
+  --foreground: #d4e4f7;
+  --card: #0f1f35;
+  --card-border: #1a3050;
+  --card-hover: #142840;
+  --primary: #0ea5e9;
+  --primary-hover: #38bdf8;
+  --success: #2dd4bf;
+  --danger: #fb7185;
+  --warning: #fbbf24;
+  --muted: #5a7a9a;
+  --accent: #22d3ee;
+  --input-bg: rgba(10, 22, 45, 0.6);
+  --input-border: rgba(30, 80, 130, 0.4);
+  --sidebar-bg: #081220;
+  --header-bg: rgba(10, 22, 40, 0.9);
+  --table-row-hover: rgba(14, 165, 233, 0.05);
+  --grid-stroke: #1a3050;
+  --scrollbar-thumb: #1e3a5f;
+}
+
+/* ─── Forest Theme ─── */
+html.forest {
+  --background: #0a120a;
+  --foreground: #d4e8d0;
+  --card: #0f1a0f;
+  --card-border: #1a3018;
+  --card-hover: #142514;
+  --primary: #22c55e;
+  --primary-hover: #4ade80;
+  --success: #86efac;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --muted: #5a7a55;
+  --accent: #34d399;
+  --input-bg: rgba(10, 20, 10, 0.6);
+  --input-border: rgba(30, 80, 30, 0.4);
+  --sidebar-bg: #081208;
+  --header-bg: rgba(10, 18, 10, 0.9);
+  --table-row-hover: rgba(34, 197, 94, 0.05);
+  --grid-stroke: #1a3018;
+  --scrollbar-thumb: #1e3a1e;
+}
+
+/* ─── Sunset Theme ─── */
+html.sunset {
+  --background: #1a0a0a;
+  --foreground: #f0d4c8;
+  --card: #201010;
+  --card-border: #3a1a15;
+  --card-hover: #2a1512;
+  --primary: #f97316;
+  --primary-hover: #fb923c;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #eab308;
+  --muted: #8a5a4a;
+  --accent: #f43f5e;
+  --input-bg: rgba(30, 12, 10, 0.6);
+  --input-border: rgba(120, 50, 40, 0.4);
+  --sidebar-bg: #150808;
+  --header-bg: rgba(26, 10, 10, 0.9);
+  --table-row-hover: rgba(249, 115, 22, 0.05);
+  --grid-stroke: #3a1a15;
+  --scrollbar-thumb: #4a2520;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 3px;
+}
+
+/* ─── Glass effect ─── */
+html.dark .glass,
+html.midnight .glass {
+  background: rgba(17, 17, 24, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(99, 102, 241, 0.08);
+}
+html.light .glass {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+html.ocean .glass {
+  background: rgba(15, 31, 53, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(14, 165, 233, 0.1);
+}
+html.forest .glass {
+  background: rgba(15, 26, 15, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(34, 197, 94, 0.1);
+}
+html.sunset .glass {
+  background: rgba(32, 16, 16, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(249, 115, 22, 0.1);
+}
+
+/* ─── Glow effects ─── */
+html.dark .glow,
+html.midnight .glow {
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
+}
+html.light .glow {
+  box-shadow: 0 4px 24px rgba(99, 102, 241, 0.1);
+}
+html.ocean .glow {
+  box-shadow: 0 0 20px rgba(14, 165, 233, 0.15);
+}
+html.forest .glow {
+  box-shadow: 0 0 20px rgba(34, 197, 94, 0.15);
+}
+html.sunset .glow {
+  box-shadow: 0 0 20px rgba(249, 115, 22, 0.15);
+}
+
+/* ─── Drag handle styling ─── */
+.drag-handle {
+  cursor: grab;
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+.drag-handle:hover {
+  opacity: 1;
+}
+.dragging {
+  opacity: 0.5;
+  transform: scale(1.02);
+}
+
+/* ─── Recharts tooltip ─── */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+/* ─── Tables: align digits in currency/number columns ─── */
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Sort indicator ─── */
+.sort-btn {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+.sort-btn:hover {
+  color: var(--foreground);
+}
+
+/* ─── Live price flash animations ─── */
+@keyframes flash-up {
+  0% { background: rgba(34, 197, 94, 0.25); }
+  100% { background: transparent; }
+}
+@keyframes flash-down {
+  0% { background: rgba(239, 68, 68, 0.25); }
+  100% { background: transparent; }
+}
+.flash-up { animation: flash-up 0.8s ease-out; }
+.flash-down { animation: flash-down 0.8s ease-out; }
+
+/* ─── Print Styles ─── */
+@media print {
+  /* Hide non-essential UI */
+  aside, header, nav, .no-print,
+  button:not(.print-show), .drag-handle,
+  .recharts-surface, .recharts-wrapper {
+    display: none !important;
+  }
+
+  /* Reset layout for print */
+  body {
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 11pt;
+    line-height: 1.4;
+  }
+
+  main {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+
+  .p-6 { padding: 15mm 10mm !important; }
+
+  /* Cards / glass panels → clean white boxes */
+  .glass {
+    background: #fff !important;
+    border: 1px solid #ccc !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Tables */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 10pt;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  th, td {
+    padding: 6px 8px !important;
+    border-bottom: 1px solid #ddd !important;
+    color: #000 !important;
+  }
+
+  th {
+    background: #f0f0f0 !important;
+    font-weight: 700;
+  }
+
+  tr {
+    page-break-inside: avoid;
+  }
+
+  tfoot tr {
+    border-top: 2px solid #000 !important;
+    font-weight: 700;
+  }
+
+  /* Text colors → print-safe via attribute selector */
+  [class*="text-[var(--success)"] { color: #16a34a !important; }
+  [class*="text-[var(--primary)"] { color: #16a34a !important; }
+  [class*="text-[var(--danger)"]  { color: #dc2626 !important; }
+  [class*="text-[var(--warning)"] { color: #d97706 !important; }
+  [class*="text-[var(--muted)"]   { color: #666 !important; }
+
+  /* Ensure page header appears */
+  body::before {
+    content: "Stockfolio — " attr(data-report-title);
+    display: block;
+    font-size: 16pt;
+    font-weight: 700;
+    margin-bottom: 8pt;
+    padding-bottom: 4pt;
+    border-bottom: 2pt solid #000;
+  }
+
+  body::after {
+    content: "Generated: " attr(data-report-date);
+    display: block;
+    font-size: 8pt;
+    color: #999;
+    margin-top: 8pt;
+    padding-top: 4pt;
+    border-top: 1px solid #ccc;
+  }
+
+  /* Grid → single column */
+  .grid {
+    display: block !important;
+  }
+
+  /* Page margins */
+  @page {
+    margin: 15mm;
+    size: A4;
+  }
 }

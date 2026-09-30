@@ -39,3 +39,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# database
+/portfolio.db
+/portfolio.db-shm
+/portfolio.db-wal
+
+# electron-builder output
+/release/
+
+# personal data files
+tehnival analysis*.xlsx
+Browser
+
+# local backup script output
+backups/
+*.bak
