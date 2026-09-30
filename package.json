@@ -11,6 +11,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "update:app": "node scripts/update-app.js",
+    "test:updates": "node scripts/test-updates.js",
     "electron": "electron .",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder"

@@ -1,0 +1,10 @@
+{
+  "name": "accubook-update-sim",
+  "version": "1.0.0",
+  "description": "Update-flow verification harness for ACCUBOOK (not shipped)",
+  "main": "main.js",
+  "private": true,
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  }
+}

@@ -4,9 +4,12 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 rem ============================================================
-rem  Stockfolio launcher
-rem    start.bat          -> Desktop app (Electron) - no questions asked
-rem    start.bat browser  -> Browser mode on http://localhost:3000
+rem  Stockfolio / ACCUBOOK launcher
+rem    start.bat              -> Menu (first pick) / Desktop app
+rem    start.bat app          -> Desktop app (Electron)
+rem    start.bat browser      -> Browser mode on http://localhost:3000
+rem    start.bat update       -> Check GitHub for updates + download
+rem    start.bat test-updates -> Verify the update flow (self-test)
 rem ============================================================
 
 rem --- Make sure Node.js is available ---
@@ -20,13 +23,33 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem --- No argument: show a small menu so everything is discoverable ---
+if "%~1"=="" goto menu
+if /i "%~1"=="app" goto app
 if /i "%~1"=="browser" goto browser
+if /i "%~1"=="update" goto update
+if /i "%~1"=="test-updates" goto testupdates
+goto menu
 
-rem ---------------- Default: Electron desktop app ----------------
+:menu
 echo.
 echo  ======================================
 echo      Stockfolio Portfolio Manager
 echo  ======================================
+echo.
+echo   1. Desktop App        (default)
+echo   2. Browser Mode       (localhost:3000)
+echo   3. Check for Updates  (GitHub)
+echo   4. Test Update Flow   (self-test)
+echo.
+choice /C 1234 /N /M "  Pick 1-4: "
+if errorlevel 4 goto testupdates
+if errorlevel 3 goto update
+if errorlevel 2 goto browser
+goto app
+
+rem ---------------- Default: Electron desktop app ----------------
+:app
 echo.
 echo  Starting Desktop App Mode (Electron)...
 echo  Close the app window to stop.
@@ -74,5 +97,27 @@ start "" /min powershell -NoProfile -WindowStyle Hidden -Command "for($i=0;$i -l
 call npm run dev
 echo.
 echo  Server stopped.
+pause
+exit /b 0
+
+rem ---------------- Manual update check (GitHub Releases) ----------------
+:update
+echo.
+echo  Checking GitHub for updates (manual - the app never does this on its own)...
+echo.
+node scripts\update-app.js
+echo.
+echo  Update check finished.
+pause
+exit /b 0
+
+rem ---------------- Self-test of the whole update flow ----------------
+:testupdates
+echo.
+echo  Verifying the update flow (build + simulated release checks)...
+echo  This takes a few minutes on first run.
+echo.
+call npm run test:updates
+echo.
 pause
 exit /b 0

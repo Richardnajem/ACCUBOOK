@@ -55,3 +55,9 @@ Browser
 # local backup script output
 backups/
 *.bak
+
+# update-flow self-test harness artifacts
+tests/electron/update-sim/dist/
+tests/electron/update-sim/feed/
+tests/electron/update-sim/node_modules/
+release/

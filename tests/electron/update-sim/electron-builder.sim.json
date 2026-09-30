@@ -1,0 +1,25 @@
+{
+  "appId": "com.accubook.updatesim",
+  "productName": "ACCUBOOK Update Sim",
+  "directories": {
+    "output": "dist",
+    "buildResources": "."
+  },
+  "asar": true,
+  "files": [
+    "main.js",
+    "package.json"
+  ],
+  "win": {
+    "target": ["nsis"]
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false
+  },
+  "publish": {
+    "provider": "github",
+    "owner": "Richardnajem",
+    "repo": "ACCUBOOK"
+  }
+}
