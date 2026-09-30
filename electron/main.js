@@ -1,25 +1,30 @@
-const { app, BrowserWindow, nativeImage, dialog, Menu } = require("electron");
+const { app, BrowserWindow, nativeImage, ipcMain } = require("electron");
 const path = require("path");
 const net = require("net");
 const http = require("http");
 const fs = require("fs");
 const { spawn } = require("child_process");
 
-// Auto-update via GitHub Releases (electron-updater). Completely optional:
-// if no publish repo is configured, or the machine is offline, everything
-// below no-ops silently and the app keeps working as-is.
+// Updates are 100% MANUAL. The app never checks for updates on its own —
+// the only check happens when the user clicks "Check for Updates" in
+// Settings. Even then nothing downloads automatically: the user confirms,
+// the update downloads, and installs on the next app quit (or on demand).
+// Safe on every PC: if this no-ops (dev mode, offline, no releases yet),
+// the Settings page just says "Up to date" or "Couldn't check".
 let autoUpdater = null;
 try {
   autoUpdater = require("electron-updater").autoUpdater;
-  autoUpdater.autoDownload = false; // ask before downloading
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoDownload = false;          // never download without the user asking
+  autoUpdater.autoInstallOnAppQuit = false;  // never swap binaries silently
   autoUpdater.on("update-available", (info) => {
     if (mainWindow) {
       mainWindow.webContents.send("update-status", { type: "available", version: info.version });
     }
   });
-  autoUpdater.on("update-not-available", () => {
-    if (mainWindow) mainWindow.webContents.send("update-status", { type: "up-to-date" });
+  autoUpdater.on("update-not-available", (info) => {
+    if (mainWindow) {
+      mainWindow.webContents.send("update-status", { type: "up-to-date", version: info?.version });
+    }
   });
   autoUpdater.on("error", () => {
     if (mainWindow) mainWindow.webContents.send("update-status", { type: "error" });
@@ -27,17 +32,40 @@ try {
   autoUpdater.on("download-progress", (p) => {
     if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloading", percent: Math.round(p.percent) });
   });
-  autoUpdater.on("update-downloaded", () => {
-    if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloaded" });
+  autoUpdater.on("update-downloaded", (info) => {
+    if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloaded", version: info?.version });
   });
 } catch {
   // electron-updater not installed / not packaged yet — ignore
 }
 
+// Manual-only check, invoked from the Settings page.
 function checkForUpdates() {
-  if (!autoUpdater || app.isPackaged !== true) return;
-  // Fails silently when the publish repo is still SET-ME-* or offline.
+  if (!autoUpdater || app.isPackaged !== true) {
+    if (mainWindow) mainWindow.webContents.send("update-status", { type: "up-to-date" });
+    return;
+  }
+  // Network/publish-config errors surface as the "error" status above.
   autoUpdater.checkForUpdates().catch(() => {});
+}
+
+function downloadUpdate() {
+  if (!autoUpdater || app.isPackaged !== true) return;
+  autoUpdater.downloadUpdate().catch(() => {});
+}
+
+function installUpdate() {
+  if (!autoUpdater || app.isPackaged !== true) return;
+  quitting = true;
+  autoUpdater.quitAndInstall(false, true);
+}
+
+// IPC surface for the renderer (Settings page).
+ipcMain.on("updates:check", () => checkForUpdates());
+ipcMain.on("updates:download", () => downloadUpdate());
+ipcMain.on("updates:install", () => installUpdate());
+ipcMain.handle("updates:is-packaged", () => app.isPackaged === true);
+ipcMain.handle("updates:version", () => app.getVersion());
 }
 
 const isDev = !app.isPackaged;
@@ -226,8 +254,8 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
 
-  // Check for updates once the window is up (packaged builds only)
-  mainWindow.webContents.on("did-finish-load", () => checkForUpdates());
+  // NOTE: deliberately no update check on startup — updates are manual only
+  // (Settings → Check for Updates).
 
   // If the page fails to load (server not up yet), show an error page.
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
