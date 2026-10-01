@@ -238,7 +238,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: "Stockfolio — Portfolio Manager",
+    title: "Stockfolio — Portfolio Manager by Richard Najem",
     backgroundColor: "#0a0a0f",
     autoHideMenuBar: true,
     show: false,

@@ -36,7 +36,7 @@ export interface CachedMeta {
 
 let cacheDb: Database.Database | null = null;
 
-function getCacheDb(): Database.Database {
+export function getCacheDb(): Database.Database {
   if (!cacheDb) {
     cacheDb = new Database(DB_PATH);
     cacheDb.pragma("journal_mode = WAL");

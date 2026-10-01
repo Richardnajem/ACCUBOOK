@@ -1,6 +1,6 @@
 # Stockfolio
 
-A local-first **portfolio management desktop app** (Electron + Next.js + SQLite). Track your
+A local-first **portfolio management desktop app** (Electron + Next.js + SQLite) **by Richard Najem**. Track your
 stock holdings, record trades, watch new ideas with live quotes, and test strategies against
 real historical market data — no accounts, no cloud, no subscriptions. Your data never
 leaves your machine.
@@ -91,6 +91,20 @@ npm install
 npm run dev              # browser mode on http://localhost:3000
 npm run dev:electron     # desktop mode (Electron + Next dev server)
 ```
+
+### Importing price-history workbooks
+
+Settings → **Import Data → Price History** accepts any Excel/CSV workbook with daily OHLCV rows
+(Nasdaq-style "Date / Close/Last / Volume / Open / High / Low" exports, technical-analysis sheets
+with extra indicator columns, or bare headerless tables). It is deliberately flexible:
+
+- every sheet in the workbook is scanned (Indicator columns are ignored)
+- the header row is auto-detected, and headerless sheets are parsed by data shape
+- the ticker is inferred from the sheet or file name (or a Symbol/Ticker column)
+- **mixed date formats in one column are resolved automatically** (e.g. `9/16/26` next to
+  `11/9/26` reading as Sep 11) by anchoring each ambiguous date to its unambiguous neighbours
+- imported tickers are stored in the same local cache as live market data, so they work in
+  Backtesting, the Mega Indicator, and the Watchlist — even offline
 
 ### Fresh clone on another computer
 

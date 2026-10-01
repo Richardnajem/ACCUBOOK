@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Stockfolio — Portfolio Manager",
+  title: "Stockfolio — Portfolio Manager by Richard Najem",
   description: "Track holdings, record trades, watchlist, backtesting, and technical analysis — all local",
 };
 

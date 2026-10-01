@@ -109,6 +109,10 @@ export default function SettingsPage() {
             <dd className="font-medium">Stockfolio (ACCUBOOK)</dd>
           </div>
           <div className="flex justify-between gap-4">
+            <dt className="text-[var(--muted)]">Developer</dt>
+            <dd className="font-medium">Richard Najem</dd>
+          </div>
+          <div className="flex justify-between gap-4">
             <dt className="text-[var(--muted)]">Data storage</dt>
             <dd className="font-medium">Local only — portfolio.db on this PC</dd>
           </div>

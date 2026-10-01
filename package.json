@@ -2,6 +2,8 @@
   "name": "stockfolio",
   "version": "2.1.0",
   "private": true,
+  "description": "Stockfolio — local-first portfolio manager by Richard Najem",
+  "author": "Richard Najem <richard2.najem@gmail.com>",
   "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",

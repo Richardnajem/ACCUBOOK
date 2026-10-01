@@ -114,7 +114,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       <div className="p-4 border-t border-[var(--card-border)]">
         <div className="flex items-center justify-between text-xs text-[var(--muted)]">
-          <span>Stockfolio v2.0</span>
+          <span>by Richard Najem</span>
           <span>Local</span>
         </div>
       </div>

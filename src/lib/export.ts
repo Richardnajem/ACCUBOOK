@@ -58,7 +58,7 @@ export function printReport(title: string, content: string) {
 <body>
   ${content}
   <div class="footer">
-    <span>Stockfolio — Local Portfolio Manager</span>
+    <span>Stockfolio — Local Portfolio Manager by Richard Najem</span>
     <span>Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</span>
   </div>
 </body>
