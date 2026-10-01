@@ -66,7 +66,6 @@ ipcMain.on("updates:download", () => downloadUpdate());
 ipcMain.on("updates:install", () => installUpdate());
 ipcMain.handle("updates:is-packaged", () => app.isPackaged === true);
 ipcMain.handle("updates:version", () => app.getVersion());
-}
 
 const isDev = !app.isPackaged;
 

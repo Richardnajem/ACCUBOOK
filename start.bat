@@ -5,8 +5,7 @@ cd /d "%~dp0"
 
 rem ============================================================
 rem  Stockfolio / ACCUBOOK launcher
-rem    start.bat              -> Menu (first pick) / Desktop app
-rem    start.bat app          -> Desktop app (Electron)
+rem    start.bat              -> Desktop app (Electron) - DEFAULT
 rem    start.bat browser      -> Browser mode on http://localhost:3000
 rem    start.bat update       -> Check GitHub for updates + download
 rem    start.bat test-updates -> Verify the update flow (self-test)
@@ -23,38 +22,33 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem --- No argument: show a small menu so everything is discoverable ---
-if "%~1"=="" goto menu
-if /i "%~1"=="app" goto app
 if /i "%~1"=="browser" goto browser
 if /i "%~1"=="update" goto update
 if /i "%~1"=="test-updates" goto testupdates
-goto menu
 
-:menu
+rem ============================================================
+rem  DEFAULT: go straight to the Electron desktop app
+rem ============================================================
 echo.
-echo  ======================================
-echo      Stockfolio Portfolio Manager
-echo  ======================================
-echo.
-echo   1. Desktop App        (default)
-echo   2. Browser Mode       (localhost:3000)
-echo   3. Check for Updates  (GitHub)
-echo   4. Test Update Flow   (self-test)
-echo.
-choice /C 1234 /N /M "  Pick 1-4: "
-if errorlevel 4 goto testupdates
-if errorlevel 3 goto update
-if errorlevel 2 goto browser
-goto app
-
-rem ---------------- Default: Electron desktop app ----------------
-:app
-echo.
-echo  Starting Desktop App Mode (Electron)...
+echo  Starting Desktop App (Electron)...
 echo  Close the app window to stop.
 echo  Tip: "start.bat browser" launches in the browser instead.
 echo.
+
+rem --- First run on a fresh clone: install dependencies ---
+if not exist "node_modules" (
+    echo  First run detected - installing dependencies ^(one time, a few minutes^)...
+    echo.
+    call npm install
+    if errorlevel 1 (
+        echo.
+        echo  [ERROR] npm install failed. Check your internet connection and retry.
+        echo.
+        pause
+        exit /b 1
+    )
+    echo.
+)
 
 rem --- Kill leftover Electron instances (single-instance lock) ---
 taskkill /IM electron.exe /F >nul 2>&1
@@ -84,6 +78,21 @@ echo  Starting Browser Mode...
 echo  The dashboard will open automatically when the server is ready.
 echo  Keep this window open. Press Ctrl+C to stop the server.
 echo.
+
+rem --- First run on a fresh clone: install dependencies ---
+if not exist "node_modules" (
+    echo  First run detected - installing dependencies ^(one time, a few minutes^)...
+    echo.
+    call npm install
+    if errorlevel 1 (
+        echo.
+        echo  [ERROR] npm install failed. Check your internet connection and retry.
+        echo.
+        pause
+        exit /b 1
+    )
+    echo.
+)
 
 rem Free the browser-mode port
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr LISTENING ^| findstr ":3000 "') do (

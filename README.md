@@ -76,13 +76,31 @@ leaves your machine.
 
 ## Getting Started
 
+On Windows, just double-click **`start.bat`** — it goes straight into the Electron desktop
+app. On a fresh clone it automatically runs `npm install` first. Optional arguments:
+
+- `start.bat` — desktop app (Electron, default — no menu)
+- `start.bat browser` — browser mode on http://localhost:3000
+- `start.bat update` — check GitHub Releases for updates
+- `start.bat test-updates` — self-test of the update flow
+
+Manual setup (any OS):
+
 ```bash
 npm install
 npm run dev              # browser mode on http://localhost:3000
 npm run dev:electron     # desktop mode (Electron + Next dev server)
 ```
 
-Or just run `start.bat` on Windows (Electron mode by default, `start.bat browser` for browser mode).
+### Fresh clone on another computer
+
+1. Install [Node.js](https://nodejs.org) (LTS).
+2. `git clone https://github.com/Richardnajem/ACCUBOOK.git && cd ACCUBOOK`
+3. Double-click `start.bat` (Windows) or run `npm install && npm run dev:electron`.
+
+`package-lock.json` is committed, so `npm install` reproduces the same dependency tree
+everywhere. The SQLite database (`portfolio.db`) is **not** in git — a demo portfolio is
+seeded on first run, and you can restore your own data via in-app Backup / Restore.
 
 ## Packaging
 
