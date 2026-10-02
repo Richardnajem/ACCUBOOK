@@ -141,7 +141,7 @@ export function resolveCosts(config: BacktestConfig): ResolvedCosts {
     commissionBps: clamp(config.commissionBps ?? 0, 0, 100),
     slippageBps: clamp(config.slippageBps ?? 0, 0, 200),
     positionPct: clamp(config.positionPct ?? 100, 1, 100),
-    years: clamp(config.years ?? 10, 1, 30),
+    years: clamp(config.years ?? 10, 1 / 12, 30), // min 1 month (sub-year windows allowed)
   };
 }
 
@@ -801,8 +801,8 @@ export async function runWalkForwardOptimization(
     throw new Error(`${strategy.name} has no parameters to walk-forward.`);
   }
   const costs = resolveCosts(config);
-  const trainYears = Math.max(1, Math.min(15, opts?.trainYears ?? 3));
-  const testYears = Math.max(0.25, Math.min(5, opts?.testYears ?? 1));
+  const trainYears = Math.max(1 / 12, Math.min(15, opts?.trainYears ?? 3));
+  const testYears = Math.max(1 / 12, Math.min(5, opts?.testYears ?? 1));
 
   // Pull enough history for all folds, not just the requested window
   // (callers may inject bars directly — tests/synthetic runs).

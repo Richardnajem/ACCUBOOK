@@ -9,8 +9,10 @@ import type { WalkForwardResult, WalkForwardFold } from "@/lib/backtest-engine";
 const pct = (n: number, d = 1) => `${n.toFixed(d)}%`;
 
 const PRESETS = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ", "TSLA", "KO"];
-const TRAIN_OPTIONS = [2, 3, 5, 8];
-const TEST_OPTIONS = [0.5, 1, 2];
+const TRAIN_OPTIONS = [0.08, 0.5, 2, 3, 5, 8];
+const TEST_OPTIONS = [0.08, 0.5, 1, 2];
+// Sub-year windows render as months (1M / 6M), otherwise as years (2Y, 5Y…)
+const yearLabel = (y: number) => (y < 1 ? (Math.round(y * 12) === 1 ? "1M" : "6M") : `${y}Y`);
 
 interface CatalogParam { key: string; label: string; default: number; min?: number; max?: number; }
 interface CatalogStrategy { id: string; name: string; params: CatalogParam[]; defaults: Record<string, number>; }
@@ -151,7 +153,7 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
               {TRAIN_OPTIONS.map(y => (
                 <button key={y} onClick={() => setTrainYears(y)}
                   className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${trainYears === y ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
-                  {y}Y
+                  {yearLabel(y)}
                 </button>
               ))}
             </div>
@@ -160,7 +162,7 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
               {TEST_OPTIONS.map(y => (
                 <button key={y} onClick={() => setTestYears(y)}
                   className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${testYears === y ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
-                  {y}Y
+                  {yearLabel(y)}
                 </button>
               ))}
             </div>

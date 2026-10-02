@@ -61,7 +61,7 @@ export default function TradesPage() {
   const { push } = useUndoRedo();
 
   const load = useCallback(() => {
-    fetch("/api/trades")
+    fetch("/api/trades", { cache: "no-store" })
       .then((r) => r.json())
       .then((d) => {
         setRows(d.trades || []);

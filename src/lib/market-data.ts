@@ -302,7 +302,9 @@ export async function fetchDailyWithFailover(symbol: string, years: number): Pro
 
   if (years <= 1.05) {
     try {
-      const r = await fetchNasdaqDaily(symbol, years);
+      // Nasdaq pages in whole-year windows; a 1M/6M request just fetches the
+      // 1-year block and the cache cutoff trims it to the window.
+      const r = await fetchNasdaqDaily(symbol, Math.max(1, years));
       return { ...r, source: "nasdaq" };
     } catch (e) {
       errors.push(`Nasdaq: ${e instanceof Error ? e.message : "failed"}`);
@@ -328,9 +330,12 @@ export async function getDailyBars(symbol: string, years = 10): Promise<{ bars: 
   if (!sym) throw new Error("Ticker is required.");
   if (!/^[A-Z0-9.\-^=]{1,12}$/.test(sym)) throw new Error(`"${symbol}" does not look like a valid ticker symbol.`);
   if (!Number.isFinite(years) || years <= 0) years = 10;
+  // Allow sub-year windows (e.g. 1M ≈ 30 days, 6M = 0.5y) without clamping
+  // them up to a full year.
+  const windowDays = Math.max(7, Math.round(years * 365.25));
 
   const db = getCacheDb();
-  const earliest = new Date(Date.now() - years * 365.25 * 86400_000).toISOString().slice(0, 10);
+  const earliest = new Date(Date.now() - windowDays * 86400_000).toISOString().slice(0, 10);
   const today = todayNY();
   const marketOpen = isUsMarketOpen();
   // While the market is open, today's bar is a partial (close = last trade), so

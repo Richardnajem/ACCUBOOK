@@ -1,13 +1,14 @@
 // Real-time quotes via Yahoo Finance.
 //
 // Key points:
-// - TRUE live prices: the v8 chart endpoint's meta.regularMarketPrice is the
-//   live last-traded price, updated continuously during market hours. This
-//   endpoint is keyless and does not need cookies/crumb (unlike v7 quote).
+// - TRUE live prices, matching what Yahoo's own web cards show (like the
+//   SHOP/MRVL/CRWV cards): during the regular session this is the streaming
+//   regularMarketPrice; outside regular hours the **last extended-hours
+//   trade** (pre/post market) is the live price you see on the web.
+// - includePrePost=true so the 1-minute series covers pre-market + regular +
+//   after-hours. The last bar's close is the true "last traded price".
 // - The quote is cached only for LIVE_TTL_MS (default 3s), so the UI polling
 //   every ~3s always sees fresh data, not stale numbers.
-// - The same request returns intraday 1-minute bars (range=1d&interval=1m),
-//   cached for INTRADAY_TTL_MS (default 60s), used for sparklines.
 // - No API key required.
 
 const UA =
@@ -24,7 +25,10 @@ async function fetchChartJson(sym: string): Promise<unknown> {
   let lastErr: unknown = null;
   for (const host of YAHOO_HOSTS) {
     try {
-      const url = `${host}/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1m&includePrePost=false`;
+      // includePrePost=true — extend the 1m series across pre-market and
+      // after-hours so the "last price" reflects the newest trade anywhere in
+      // the trading day, exactly like Yahoo's web quote cards.
+      const url = `${host}/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1m&includePrePost=true`;
       const res = await fetch(url, {
         headers: { "User-Agent": UA, Accept: "application/json" },
         cache: "no-store",
@@ -72,6 +76,13 @@ async function stooqFallback(sym: string): Promise<LiveQuote> {
     preMarket: null,
     postMarket: null,
     quoteTime: Date.now(),
+    lastTradeTime: Date.now(),
+    priceHint: null,
+    lastRegularClose: null,
+    displayPrice: close,
+    displayChange: null,
+    displayChangePercent: null,
+    displaySession: null,
   };
   return quote;
 }
@@ -81,9 +92,9 @@ export interface LiveQuote {
   name: string | null;
   currency: string;
   exchange: string | null;
-  price: number | null;         // live last-traded price (regular hours)
+  price: number | null;         // regular-session last price (Yahoo regularMarketPrice)
   previousClose: number | null;
-  change: number | null;
+  change: number | null;        // regular-session change vs previous close
   changePercent: number | null;
   dayHigh: number | null;
   dayLow: number | null;
@@ -93,7 +104,19 @@ export interface LiveQuote {
   marketState: string | null;   // REGULAR / PRE / POST / CLOSED / PREPRE / POSTPOST
   preMarket: number | null;
   postMarket: number | null;
-  quoteTime: number | null;     // epoch ms of the last quote
+  quoteTime: number | null;     // epoch ms of the last regular quote
+  lastTradeTime: number | null; // epoch ms of the newest trade in ANY session (pre/regular/post)
+  priceHint: number | null;     // exchange quoting decimals (sub-$1 = 4)
+  lastRegularClose: number | null; // previous regular close, session-corrected
+  // ── Extended-hours "what the web shows" fields ──
+  // displayPrice = the price a quote card would show right now: the newest
+  // trade across pre + regular + post sessions. displayChange/Percent are
+  // Yahoo's card convention: vs previous close during regular hours, and vs
+  // the regular-session close during extended hours.
+  displayPrice: number | null;
+  displayChange: number | null;
+  displayChangePercent: number | null;
+  displaySession: string | null; // "pre" | "regular" | "post" | null
 }
 
 export interface IntradayPoint {
@@ -116,7 +139,10 @@ function validSymbol(raw: string): string | null {
 
 // ─── Market-hours detection (US Eastern time fallback) ─────────
 // Yahoo's chart endpoint often omits marketState; derive it from the quote
-// timestamp and US market hours (9:30–16:00 ET, Mon–Fri).
+// timestamp and US market hours (4:00–9:30 pre, 9:30–16:00 regular,
+// 16:00–20:00 post ET, Mon–Fri). A session counts as live only if the last
+// trade is fresh (extended-hours trades trickle in slowly; a stale timestamp
+// means the session ended and the market is effectively closed).
 function marketStateFallback(m: Record<string, unknown>): string {
   const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const qt = n(m.regularMarketTime); // epoch seconds
@@ -148,8 +174,9 @@ export async function getLiveQuote(symbol: string): Promise<LiveQuote> {
   const cached = liveCache.get(sym);
   if (cached && Date.now() - cached.at < LIVE_TTL_MS) return cached.data;
 
-  // range=1d&interval=1m: meta.regularMarketPrice is the live price and the
-  // quote array doubles as the intraday 1m curve for sparklines.
+  // range=1d&interval=1m&includePrePost=true: meta carries the regular-session
+  // price; the 1m bar series carries pre/regular/post trades whose last close
+  // is the newest traded price of the day (what Yahoo's cards display).
   // Multi-source: Yahoo q1 → q2; if both fail, Stooq last close.
   let json: {
     chart?: {
@@ -194,6 +221,79 @@ export async function getLiveQuote(symbol: string): Promise<LiveQuote> {
   const price = n(m.regularMarketPrice);
   const prev = n(m.chartPreviousClose) ?? n(m.previousClose);
 
+  // ── Extended-hours display price: the newest trade across all sessions ──
+  // Yahoo web cards show the post/pre-market trade as the headline price when
+  // the regular session is closed (e.g. MRVL 268.36 +1.57% after 4pm).
+  // Compute the last bar's close and label the session from its timestamp and
+  // the exchange's tradingPeriods so "what the user sees" matches the web.
+  // points only contains non-null closes (filtered above), so the last entry
+  // is the newest traded price of the day.
+  const lastBarPrice: number | null = points.length > 0 ? points[points.length - 1].price : null;
+  const lastBarTime: number | null = points.length > 0 ? points[points.length - 1].t : null;
+
+  let session: "pre" | "regular" | "post" | null = null;
+  if (lastBarTime !== null) {
+    const periods = m.tradingPeriods as Record<string, unknown> | undefined;
+    const pick = (key: string): { start: number; end: number } | null => {
+      const seg = (periods?.[key] as Array<Array<{ start?: number; end?: number }>> | undefined)?.[0]?.[0];
+      return seg && typeof seg.start === "number" && typeof seg.end === "number"
+        ? { start: seg.start * 1000, end: seg.end * 1000 }
+        : null;
+    };
+    const pre = pick("pre"), reg = pick("regular"), post = pick("post");
+    const t = lastBarTime;
+    // Classification order matters: 16:00 falls in both post and regular end.
+    if (post && t >= post.start) session = "post";
+    else if (reg && t >= reg.start) session = "regular";
+    else if (pre && t >= pre.start) session = "pre";
+    // Fallback when the exchange gives no tradingPeriods (crypto, indices):
+    if (session === null) {
+      const state = typeof m.marketState === "string" ? m.marketState : marketStateFallback(m);
+      if (state.startsWith("PRE")) session = "pre";
+      else if (state.startsWith("POST")) session = "post";
+      else session = "regular";
+    }
+  }
+
+  // Previous regular close, session-corrected: during pre/post hours Yahoo's
+  // chartPreviousClose points at the close BEFORE the last completed regular
+  // session (wrong baseline for a new day), while regularMarketPrice IS that
+  // session's close. During regular hours chartPreviousClose is correct.
+  const lastRegularClose = session === "regular" || session === null ? prev : (price ?? prev);
+
+  // Headline price shown by the UI: newest trade anywhere in the day.
+  const displayPrice = lastBarPrice ?? price;
+  // Card convention: during regular hours change is vs previous close; in
+  // extended hours it's vs the regular-session close (matches Yahoo cards).
+  const displayChange =
+    displayPrice !== null && prev !== null
+      ? session === "regular" || session === null
+        ? displayPrice - prev
+        : displayPrice - (price ?? prev)
+      : null;
+  const displayChangeBase = displayChange !== null && displayPrice !== null
+    ? (session === "regular" || session === null ? prev : (price ?? prev))
+    : null;
+  const displayChangePercent =
+    displayChange !== null && displayChangeBase !== null && displayChangeBase !== 0
+      ? (displayChange / displayChangeBase) * 100
+      : null;
+
+  // Market state: prefer Yahoo's own; else derive it, but trust the newest
+  // trade timestamp so a fresh post-market bar shows AFTER HOURS, not CLOSED.
+  let marketState = typeof m.marketState === "string" && m.marketState ? m.marketState : marketStateFallback(m);
+  const nowMs = Date.now();
+  const freshTrade = lastBarTime !== null && nowMs - lastBarTime < 15 * 60_000;
+  if (session === "post" && !marketState.startsWith("POST")) {
+    marketState = freshTrade ? "POST" : "CLOSED";
+  } else if (session === "pre" && !marketState.startsWith("PRE")) {
+    marketState = freshTrade ? "PRE" : "CLOSED";
+  }
+
+  // Timestamp of the newest trade in any session — during extended hours this
+  // is minutes old while regularMarketTime still points at yesterday 16:00.
+  const lastTradeTime = lastBarTime ?? (n(m.regularMarketTime) !== null ? n(m.regularMarketTime)! * 1000 : null);
+
   const quote: LiveQuote = {
     symbol: typeof m.symbol === "string" ? m.symbol : sym,
     name: typeof m.longName === "string" ? m.longName : typeof m.shortName === "string" ? m.shortName : null,
@@ -208,10 +308,17 @@ export async function getLiveQuote(symbol: string): Promise<LiveQuote> {
     yearHigh: n(m.fiftyTwoWeekHigh),
     yearLow: n(m.fiftyTwoWeekLow),
     volume: n(m.regularMarketVolume),
-    marketState: typeof m.marketState === "string" ? m.marketState : marketStateFallback(m),
+    marketState,
     preMarket: n(m.preMarketPrice),
     postMarket: n(m.postMarketPrice),
     quoteTime: n(m.regularMarketTime) !== null ? n(m.regularMarketTime)! * 1000 : null,
+    lastTradeTime,
+    priceHint: n(m.priceHint),
+    lastRegularClose,
+    displayPrice,
+    displayChange,
+    displayChangePercent,
+    displaySession: session,
   };
 
   liveCache.set(sym, { at: Date.now(), data: quote });

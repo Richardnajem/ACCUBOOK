@@ -100,42 +100,6 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ── About ───────────────────────────────────────────── */}
-      <section className="rounded-xl border border-[var(--card-border)] p-5" style={{ background: "var(--card)" }}>
-        <h3 className="font-semibold">About</h3>
-        <dl className="mt-3 space-y-2 text-sm">
-          <div className="flex justify-between gap-4">
-            <dt className="text-[var(--muted)]">App</dt>
-            <dd className="font-medium">Stockfolio (ACCUBOOK)</dd>
-          </div>
-          <div className="flex justify-between gap-4">
-            <dt className="text-[var(--muted)]">Developer</dt>
-            <dd className="font-medium">Richard Najem</dd>
-          </div>
-          <div className="flex justify-between gap-4">
-            <dt className="text-[var(--muted)]">Data storage</dt>
-            <dd className="font-medium">Local only — portfolio.db on this PC</dd>
-          </div>
-          <div className="flex justify-between gap-4">
-            <dt className="text-[var(--muted)]">Source code</dt>
-            <dd className="font-medium">
-              <a
-                href="https://github.com/Richardnajem/ACCUBOOK"
-                target="_blank"
-                rel="noreferrer"
-                className="text-indigo-500 hover:text-indigo-400"
-              >
-                github.com/Richardnajem/ACCUBOOK
-              </a>
-            </dd>
-          </div>
-          <div className="flex justify-between gap-4">
-            <dt className="text-[var(--muted)]">License</dt>
-            <dd className="font-medium">MIT</dd>
-          </div>
-        </dl>
-      </section>
-
       {/* ── Data & backups ─────────────────────────────────── */}
       <section className="rounded-xl border border-[var(--card-border)] p-5" style={{ background: "var(--card)" }}>
         <h3 className="font-semibold">Data &amp; backups</h3>
@@ -157,6 +121,19 @@ export default function SettingsPage() {
           </li>
         </ul>
       </section>
+
+      {/* ── Watermark ──────────────────────────────────────── */}
+      <div className="flex flex-col items-end text-right pt-2">
+        <span className="text-xs text-[var(--muted)]">by Richard Najem</span>
+        <a
+          href="https://github.com/Richardnajem/ACCUBOOK"
+          target="_blank"
+          rel="noreferrer"
+          className="text-[11px] text-[var(--muted)] hover:text-indigo-400"
+        >
+          github.com/Richardnajem/ACCUBOOK
+        </a>
+      </div>
     </div>
   );
 }

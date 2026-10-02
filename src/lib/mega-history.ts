@@ -61,7 +61,9 @@ export async function getMegaHistory(
   years = 3,
 ): Promise<MegaHistoryResult> {
   const sym = symbol.trim().toUpperCase();
-  const wHash = hashWeights(weights);
+  // Sub-year windows (1M ≈ 0.08y, 6M = 0.5y) must be part of the cache key,
+  // otherwise the 1M chart would be served the cached 3Y series trimmed client-side.
+  const wHash = `${hashWeights(weights)}:${years}`;
   const warnings: string[] = [];
 
   // ─── Cache lookup ───────────────────────────────────────────
@@ -86,7 +88,12 @@ export async function getMegaHistory(
   if (cachedRow) {
     try {
       const parsed = JSON.parse(cachedRow.points_json) as { to: string; points: HistoryPoint[] };
-      if (parsed.to === lastDate && Array.isArray(parsed.points) && parsed.points.length > 0) {
+      const fromCut = new Date(Date.now() - years * 365.25 * 86400_000).toISOString().slice(0, 10);
+      if (
+        parsed.to === lastDate &&
+        Array.isArray(parsed.points) && parsed.points.length > 0 &&
+        parsed.points[0]?.date <= fromCut // covers the requested window
+      ) {
         return {
           symbol: sym,
           from: parsed.points[0].date,

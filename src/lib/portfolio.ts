@@ -177,6 +177,13 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
 // ─── Live enrichment ────────────────────────────────────────────
 export interface QuotedPosition extends Position {
   lastPrice: number | null;
+  prevClose: number | null;
+  bid: number | null;
+  ask: number | null;
+  bidSize: number | null;
+  askSize: number | null;
+  spreadPct: number | null;
+  bookSource: string | null;
   marketValue: number;
   unrealized: number;
   unrealizedPct: number;
@@ -194,17 +201,30 @@ export interface EnrichedPortfolio {
 
 export function enrichWithQuotes(
   snapshot: PortfolioSnapshot,
-  quotes: Record<string, { price: number; change: number; changePercent: number; name: string | null; currency: string }>,
+  quotes: Record<string, {
+    price: number; change: number; changePercent: number; previousClose?: number | null;
+    name: string | null; currency: string;
+    bid?: number | null; ask?: number | null; bidSize?: number | null; askSize?: number | null;
+    spreadPct?: number | null; bookSource?: string | null;
+  }>,
   errors: Record<string, string> = {},
 ): EnrichedPortfolio {
   const quoted: QuotedPosition[] = snapshot.positions.map((p) => {
     const q = quotes[p.symbol];
     const lastPrice = q?.price ?? null;
+    const prevClose = q?.previousClose ?? null;
     const marketValue = lastPrice != null ? p.shares * lastPrice : p.costBasis; // fallback to cost
     const unrealized = lastPrice != null ? marketValue - p.costBasis : 0;
     return {
       ...p,
       lastPrice,
+      prevClose,
+      bid: q?.bid ?? null,
+      ask: q?.ask ?? null,
+      bidSize: q?.bidSize ?? null,
+      askSize: q?.askSize ?? null,
+      spreadPct: q?.spreadPct ?? null,
+      bookSource: q?.bookSource ?? null,
       marketValue,
       unrealized,
       unrealizedPct: p.costBasis > 0 ? (unrealized / p.costBasis) * 100 : 0,

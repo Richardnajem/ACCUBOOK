@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // GET /api/watchlist — saved symbols with live quotes + target price alerts.
+// Extended-hours display price so watchlist cards match Yahoo web after 4pm.
 export async function GET() {
   const items = getWatchlist();
 
@@ -13,16 +14,19 @@ export async function GET() {
     items.map(async (item) => {
       try {
         const q = await getLiveQuote(item.symbol);
+        const dispPrice = q.displayPrice ?? q.price;
+        const prevClose = q.lastRegularClose ?? q.previousClose;
         const distPct =
-          item.target_price && q.price
-            ? ((item.target_price - q.price) / q.price) * 100
+          item.target_price && dispPrice
+            ? ((item.target_price - dispPrice) / dispPrice) * 100
             : null;
         return {
           ...item,
           quote: {
-            price: q.price,
-            change: q.change,
-            changePercent: q.changePercent,
+            price: dispPrice,
+            change: q.displayChange ?? q.change,
+            changePercent: q.displayChangePercent ?? q.changePercent,
+            previousClose: prevClose,
             name: q.name,
             marketState: q.marketState,
           },

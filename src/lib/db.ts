@@ -45,7 +45,34 @@ function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date);
     CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
+}
+
+// ─── App settings (key-value; panel layouts, misc prefs) ────────
+export function getSetting(key: string): string | null {
+  const row = getDb().prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string) {
+  getDb()
+    .prepare("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP")
+    .run(key, value);
+}
+
+export function getSettingsByPrefix(prefix: string): Record<string, string> {
+  const rows = getDb()
+    .prepare("SELECT key, value FROM app_settings WHERE key LIKE ?")
+    .all(`${prefix}%`) as Array<{ key: string; value: string }>;
+  const out: Record<string, string> = {};
+  for (const r of rows) out[r.key] = r.value;
+  return out;
 }
 
 // ─── Types ──────────────────────────────────────────────────────

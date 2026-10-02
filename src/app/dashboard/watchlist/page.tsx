@@ -15,6 +15,7 @@ interface WatchRow {
     price: number | null;
     change: number | null;
     changePercent: number | null;
+    previousClose: number | null;
     name: string | null;
     marketState: string | null;
   } | null;
@@ -36,7 +37,7 @@ export default function WatchlistPage() {
   const { push } = useUndoRedo();
 
   const load = useCallback(() => {
-    fetch("/api/watchlist")
+    fetch("/api/watchlist", { cache: "no-store" })
       .then((r) => r.json())
       .then((d) => {
         setRows(d.items || []);
@@ -47,11 +48,12 @@ export default function WatchlistPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Refresh quotes every 15s
+  // Refresh quotes every 5s (server quote cache is 3s TTL, so every poll sees
+  // a fresh quote without hammering Yahoo)
   useEffect(() => {
     const t = setInterval(() => {
       if (document.visibilityState !== "hidden") load();
-    }, 15000);
+    }, 5000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -202,6 +204,14 @@ export default function WatchlistPage() {
                       {up ? "▲" : "▼"} {Math.abs(q.changePercent).toFixed(2)}%
                     </span>
                   )}
+                </div>
+                {/* Live price vs previous close, shown as distinct values */}
+                <div className="flex items-center gap-3 mt-1 text-[11px] text-[var(--muted)]">
+                  <span className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--success)] animate-pulse" />
+                    Live
+                  </span>
+                  {q?.previousClose != null && <span>Prev close <b className="text-[var(--foreground)] tabular-nums">{fmt(q.previousClose)}</b></span>}
                 </div>
                 {row.error && <p className="text-xs text-amber-500 dark:text-amber-400 mt-1">⚠ {row.error}</p>}
 

@@ -7,12 +7,13 @@ export const dynamic = "force-dynamic";
 
 // GET /api/mega-history?ticker=AAPL&years=3&weights={"ta-rsi-14":2}
 // Returns the composite + per-indicator scores at every historical bar,
-// for the score-over-time graph.
+// for the score-over-time graph. Sub-year windows are allowed: years=0.08
+// (~1 month / 30 days) and years=0.5 (6 months).
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const ticker = (searchParams.get("ticker") || "").trim();
-    const years = Math.min(10, Math.max(1, Number(searchParams.get("years")) || 3));
+    const years = Math.min(10, Math.max(1 / 12, Number(searchParams.get("years")) || 3));
     if (!ticker) {
       return NextResponse.json({ error: "ticker query param is required." }, { status: 400 });
     }

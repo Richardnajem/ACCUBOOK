@@ -262,6 +262,15 @@ table {
 .flash-up { animation: flash-up 0.8s ease-out; }
 .flash-down { animation: flash-down 0.8s ease-out; }
 
+/* ─── Maximized panel: grow charts to fill the screen ─── */
+.maximized-body .recharts-responsive-container {
+  height: min(74vh, 1000px) !important;
+}
+.maximized-body .recharts-wrapper,
+.maximized-body .recharts-surface {
+  height: 100% !important;
+}
+
 /* ─── Print Styles ─── */
 @media print {
   /* Hide non-essential UI */

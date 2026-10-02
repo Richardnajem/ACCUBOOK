@@ -7,6 +7,7 @@ import {
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
 import { scoreColor, scoreLabel, WeightMap } from "@/lib/mega-indicator";
+import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 
 interface MegaIndicator {
   id: string;
@@ -59,6 +60,11 @@ interface LiveQuote {
   preMarket: number | null;
   postMarket: number | null;
   quoteTime: number | null;
+  displayPrice: number | null;
+  displayChange: number | null;
+  displayChangePercent: number | null;
+  displaySession: "pre" | "regular" | "post" | null;
+  lastTradeTime: number | null;
 }
 
 interface SparkPoint { t: number; price: number; }
@@ -82,8 +88,64 @@ interface MegaHistoryResponse {
   error?: string;
 }
 
+interface SourceReport {
+  source: string;
+  ok: boolean;
+  error?: string;
+  price: number | null;
+  changePercent: number | null;
+  tradeTime: number | null;
+  marketState: string | null;
+  extended: boolean;
+  ms: number;
+  bid: number | null;
+  ask: number | null;
+  bidSize: number | null;
+  askSize: number | null;
+}
+
+interface Verification {
+  sourceCount: number;
+  agreeing: number;
+  spreadPct: number | null;
+  verifiedBy: string[];
+  sources: SourceReport[];
+}
+
 interface LiveResponse {
-  quote: LiveQuote;
+  quote: {
+    symbol: string;
+    price: number | null;
+    previousClose: number | null;
+    change: number | null;
+    changePercent: number | null;
+    dayHigh: number | null;
+    dayLow: number | null;
+    volume: number | null;
+    marketState: string | null;
+    lastTradeTime: number | null;
+    quoteTime: number | null;
+    name?: string | null;
+    yearLow?: number | null;
+    yearHigh?: number | null;
+    /** exchange quoting decimals (sub-$1 = 4) */
+    priceHint?: number | null;
+    /** best bid / ask across sources (mini-NBBO) */
+    bid?: number | null;
+    ask?: number | null;
+    bidSize?: number | null;
+    askSize?: number | null;
+    bidSource?: string | null;
+    askSource?: string | null;
+    spreadAbs?: number | null;
+    spreadPct?: number | null;
+    // Kept for the extended-hours session badge (session inference)
+    displayPrice?: number | null;
+    displayChange?: number | null;
+    displayChangePercent?: number | null;
+    displaySession?: "pre" | "regular" | "post" | null;
+  };
+  verification: Verification;
   spark: SparkPoint[];
   sparkError: string | null;
   error?: string;
@@ -104,6 +166,10 @@ function loadStored<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
+
+const fmt = (n: number | null) =>
+  n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+const pct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`);
 
 const categoryIcons: Record<string, string> = {
   Technical: "📉",
@@ -200,7 +266,7 @@ export default function MegaIndicatorPage() {
       try {
         const params = new URLSearchParams();
         if (ticker) params.set("ticker", ticker);
-        const res = await fetch(`/api/mega-indicator?${params.toString()}`);
+        const res = await fetch(`/api/mega-indicator?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
@@ -244,7 +310,7 @@ export default function MegaIndicatorPage() {
     (async () => {
       setHistoryLoading(true);
       try {
-        const res = await fetch(`/api/mega-history?ticker=${encodeURIComponent(ticker)}&years=${historyYears}`);
+        const res = await fetch(`/api/mega-history?ticker=${encodeURIComponent(ticker)}&years=${historyYears}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
@@ -279,7 +345,7 @@ export default function MegaIndicatorPage() {
         return;
       }
       try {
-        const res = await fetch(`/api/live-quote?ticker=${encodeURIComponent(ticker)}`);
+        const res = await fetch(`/api/live-quote?ticker=${encodeURIComponent(ticker)}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
@@ -375,10 +441,24 @@ export default function MegaIndicatorPage() {
 
   // ─── Live strip helpers ─────────────────────────────────────────
   const q = live?.quote || null;
-  const up = (q?.change ?? 0) >= 0;
-  const changeColor = q ? ((q.change ?? 0) >= 0 ? "text-emerald-500" : "text-red-500") : "";
+  // The API headline is already the freshest multi-source extended-hours
+  // price; derive the session label from the market state for the badge.
+  const sessionOf = (ms: string | null): "pre" | "regular" | "post" => {
+    const s = (ms || "").toUpperCase();
+    if (s.startsWith("PRE")) return "pre";
+    if (s.startsWith("POST")) return "post";
+    return "regular";
+  };
+  const disp = q && q.price != null
+    ? { price: q.displayPrice ?? q.price, change: q.displayChange ?? q.change, pct: q.displayChangePercent ?? q.changePercent, session: q.displaySession ?? sessionOf(q.marketState) }
+    : null;
+  const up = (disp?.change ?? 0) >= 0;
+  const changeColor = disp ? ((disp.change ?? 0) >= 0 ? "text-emerald-500" : "text-red-500") : "";
+  // Exchange quoting decimals: sub-$1 symbols quote at 4 dp (priceHint from
+  // Yahoo meta / Nasdaq), everything else 2. Min 2 keeps big prices clean.
+  const hint = live?.quote?.priceHint ?? 2;
   const fmtPrice = (v: number | null) =>
-    v === null ? "—" : v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    v === null ? "—" : v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: Math.max(2, hint) });
   const fmtVol = (v: number | null) => {
     if (v === null) return "—";
     if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
@@ -386,6 +466,8 @@ export default function MegaIndicatorPage() {
     if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
     return String(v);
   };
+  const fmtSize = (v: number | null | undefined) =>
+    v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}K` : String(Math.round(v));
   const statePill = (() => {
     const s = q?.marketState || "";
     if (s === "REGULAR") return { label: "MARKET OPEN", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400", dot: "bg-emerald-500 animate-pulse" };
@@ -393,10 +475,27 @@ export default function MegaIndicatorPage() {
     if (s.startsWith("POST")) return { label: "AFTER HOURS", cls: "bg-indigo-500/15 text-indigo-500 dark:text-indigo-400", dot: "bg-indigo-400" };
     return { label: "MARKET CLOSED", cls: "bg-[var(--card-hover)] text-[var(--muted)]", dot: "bg-[var(--muted)]" };
   })();
+  const sessionBadge = (() => {
+    if (disp?.session === "post") return { label: "EXT · Post-market", cls: "bg-indigo-500/10 text-indigo-500 dark:text-indigo-400" };
+    if (disp?.session === "pre") return { label: "EXT · Pre-market", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" };
+    return null;
+  })();
   const sparkData = (live?.spark || []).map((p) => ({ t: p.t, price: p.price }));
-  const quoteTimeStr = q?.quoteTime
-    ? new Date(q.quoteTime).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  // Show the newest trade time in ANY session (lastTradeTime), not the regular
+  // quote time — during pre/post hours regularMarketTime points at yesterday's
+  // 16:00 close, which made a live pre-market feed look a day stale.
+  const lastTradeMs = q?.lastTradeTime ?? q?.quoteTime ?? null;
+  const quoteTimeStr = lastTradeMs
+    ? new Date(lastTradeMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : null;
+  const quoteAge = lastTradeMs ? Date.now() - lastTradeMs : null;
+  const quoteStale = quoteAge != null && quoteAge > 15 * 60_000;
+  const sessionNote =
+    disp?.session === "pre" ? "Today's pre-market vs yesterday's close"
+    : disp?.session === "post" ? "Today's after-hours vs today's close"
+    : "Regular session vs yesterday's close";
+  const verification = live?.verification ?? null;
+  const [showSources, setShowSources] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -452,11 +551,17 @@ export default function MegaIndicatorPage() {
             </div>
             <div className="flex items-baseline gap-3 mt-0.5">
               <span className={`text-4xl font-black tabular-nums px-2 -mx-2 rounded-lg ${flash === "up" ? "flash-up" : flash === "down" ? "flash-down" : ""}`}>
-                {fmtPrice(q.price)}
+                {fmtPrice(disp?.price ?? q.price)}
               </span>
+              {sessionBadge && (
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${sessionBadge.cls}`}>
+                  {sessionBadge.label}
+                </span>
+              )}
               <span className={`text-sm font-bold tabular-nums ${changeColor}`}>
-                {up ? "▲" : "▼"} {fmtPrice(q.change === null ? null : Math.abs(q.change))} ({q.changePercent === null ? "—" : Math.abs(q.changePercent).toFixed(2) + "%"})
+                {up ? "▲" : "▼"} {fmtPrice(disp?.change === null || disp?.change === undefined ? null : Math.abs(disp.change))} ({disp?.pct == null ? "—" : Math.abs(disp.pct).toFixed(2) + "%"})
               </span>
+              <span className="text-[11px] text-[var(--muted)]">{sessionNote}</span>
             </div>
           </div>
 
@@ -489,22 +594,101 @@ export default function MegaIndicatorPage() {
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1 text-xs">
             <div>
+              <p className="text-[var(--muted)]">Live Price</p>
+              <p className="font-semibold tabular-nums text-[var(--foreground)]">{fmtPrice(disp?.price ?? q.price)}</p>
+            </div>
+            <div>
+              <p className="text-[var(--muted)]">Prev Close</p>
+              <p className="font-medium tabular-nums">{fmtPrice(q.previousClose)}</p>
+            </div>
+            <div>
+              <p className="text-[var(--muted)]">
+                Bid{q.bidSource ? <span className="ml-1 text-[10px] opacity-60">{q.bidSource}</span> : null}
+              </p>
+              <p className="font-medium tabular-nums" title={q.bidSource ? `Best bid via ${q.bidSource}` : undefined}>
+                {fmtPrice(q.bid ?? null)}{q.bidSize != null && fmtSize(q.bidSize) ? <span className="text-[var(--muted)]"> ×{fmtSize(q.bidSize)}</span> : null}
+              </p>
+            </div>
+            <div>
+              <p className="text-[var(--muted)]">
+                Ask{q.askSource ? <span className="ml-1 text-[10px] opacity-60">{q.askSource}</span> : null}
+              </p>
+              <p className="font-medium tabular-nums" title={q.spreadPct != null ? `Best ask via ${q.askSource ?? ""} · spread ${fmtPrice(q.spreadAbs ?? null)} (${q.spreadPct.toFixed(2)}%)` : undefined}>
+                {fmtPrice(q.ask ?? null)}{q.askSize != null && fmtSize(q.askSize) ? <span className="text-[var(--muted)]"> ×{fmtSize(q.askSize)}</span> : null}
+                {q.spreadPct != null && <span className="ml-1.5 text-[10px] text-[var(--muted)]">{q.spreadPct.toFixed(2)}% spr</span>}
+              </p>
+            </div>
+            <div>
               <p className="text-[var(--muted)]">Day Range</p>
               <p className="font-medium tabular-nums">{fmtPrice(q.dayLow)} – {fmtPrice(q.dayHigh)}</p>
             </div>
             <div>
               <p className="text-[var(--muted)]">52W Range</p>
-              <p className="font-medium tabular-nums">{fmtPrice(q.yearLow)} – {fmtPrice(q.yearHigh)}</p>
+              <p className="font-medium tabular-nums">{fmtPrice(q.yearLow ?? null)} – {fmtPrice(q.yearHigh ?? null)}</p>
             </div>
             <div>
               <p className="text-[var(--muted)]">Volume</p>
               <p className="font-medium tabular-nums">{fmtVol(q.volume)}</p>
             </div>
             <div>
-              <p className="text-[var(--muted)]">Last Quote</p>
-              <p className="font-medium tabular-nums">{quoteTimeStr ?? "—"}{liveError ? " ⚠" : ""}</p>
+              <p className="text-[var(--muted)]">Last Trade</p>
+              <p className={`font-medium tabular-nums ${quoteStale ? "text-amber-500 dark:text-amber-400" : ""}`}>
+                {quoteTimeStr ?? "—"}{liveError ? " ⚠" : ""}
+              </p>
             </div>
           </div>
+
+          {/* ─── Multi-source verification toggle ─────────────── */}
+          {verification && verification.sourceCount > 0 && (
+            <div className="w-full border-t border-[var(--card-border)] pt-2">
+              <button
+                onClick={() => setShowSources(v => !v)}
+                className="flex items-center gap-2 text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors"
+                title="Per-source prices from five independent free feeds"
+              >
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                  verification.agreeing >= 3 ? "bg-emerald-500/10 text-[var(--success)]" :
+                  verification.agreeing >= 2 ? "bg-amber-500/10 text-[var(--warning)]" :
+                  "bg-red-500/10 text-[var(--danger)]"
+                }`}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                  {verification.agreeing}/{verification.sourceCount} sources live
+                </span>
+                {verification.spreadPct != null && (
+                  <span className="tabular-nums">spread {verification.spreadPct.toFixed(2)}%</span>
+                )}
+                <span className="underline decoration-dotted">details</span>
+              </button>
+              {showSources && (
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                  {verification.sources.map((s) => (
+                    <div key={s.source} className={`rounded-lg border p-2 text-xs ${
+                      s.ok && s.price != null ? "border-[var(--card-border)] bg-[var(--card-hover)]" : "border-red-500/30 bg-red-500/5"
+                    }`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">{s.source}</span>
+                        <span className={`w-1.5 h-1.5 rounded-full ${s.ok && s.price != null ? "bg-[var(--success)]" : "bg-[var(--danger)]"}`} />
+                      </div>
+                      {s.ok && s.price != null ? (
+                        <>
+                          <div className="tabular-nums font-medium mt-0.5">{fmtPrice(s.price)}</div>
+                          <div className={`tabular-nums ${(s.changePercent ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}`}>
+                            {s.changePercent != null ? pct(s.changePercent) : "—"}
+                          </div>
+                          <div className="text-[10px] text-[var(--muted)] mt-0.5">
+                            {s.tradeTime ? new Date(s.tradeTime).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "no time"}
+                            {s.extended ? " · ext" : ""} · {s.ms}ms
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-[var(--danger)] mt-0.5 truncate" title={s.error}>{s.error ?? "failed"}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
       {liveError && !q && (
@@ -524,9 +708,18 @@ export default function MegaIndicatorPage() {
       )}
 
       {view && (
-        <>
+        <PanelBoard
+          boardKey="mega-indicator"
+          ids={["mega-score", "score-history", "contributions", "weights", "category"]}
+          className="grid grid-cols-1 gap-6"
+        >
           {/* ─── Mega gauge header ─────────────────────────────── */}
-          <div className="glass rounded-2xl p-6 glow">
+          <ChartPanel
+            id="mega-score"
+            title="Mega Score"
+            subtitle="Composite technical health (0–100) — drag to move, ⤢ to expand"
+            className="glow"
+          >
             {totalEffectiveWeight === 0 && (
               <p className="mb-4 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-xs">
                 All indicators are excluded (weight 0) — the Mega Score defaults to 50. Raise any weight below to include it.
@@ -580,18 +773,14 @@ export default function MegaIndicatorPage() {
                 </ResponsiveContainer>
               </div>
             </div>
-          </div>
+          </ChartPanel>
 
           {/* ─── Score history over time ──────────────────────── */}
-          <div className="glass rounded-2xl p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-              <div>
-                <h3 className="text-sm font-semibold">Mega Score Over Time</h3>
-                <p className="text-xs text-[var(--muted)]">
-                  Every indicator recomputed per day (trailing windows only — no look-ahead)
-                  {history?.cached && " · cached"}
-                </p>
-              </div>
+          <ChartPanel
+            id="score-history"
+            title="Mega Score Over Time"
+            subtitle={<>Every indicator recomputed per day (trailing windows only — no look-ahead){history?.cached && " · cached"}</>}
+            right={
               <div className="flex items-center gap-2 flex-wrap">
                 <select
                   value={overlayId}
@@ -605,18 +794,25 @@ export default function MegaIndicatorPage() {
                   ))}
                 </select>
                 <div className="flex items-center bg-[var(--card)] border border-[var(--card-border)] rounded-lg p-0.5">
-                  {[1, 3, 5, 10].map((y) => (
-                    <button key={y} onClick={() => setHistoryYears(y)}
+                  {([
+                    { y: 1 / 12, label: "1M (30d)" },
+                    { y: 0.5, label: "6M" },
+                    { y: 1, label: "1Y" },
+                    { y: 3, label: "3Y" },
+                    { y: 5, label: "5Y" },
+                    { y: 10, label: "10Y" },
+                  ] as Array<{ y: number; label: string }>).map(({ y, label }) => (
+                    <button key={label} onClick={() => setHistoryYears(y)}
                       className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                         historyYears === y ? "bg-indigo-600 text-white" : "text-[var(--muted)] hover:text-[var(--foreground)]"
                       }`}>
-                      {y}Y
+                      {label}
                     </button>
                   ))}
                 </div>
               </div>
-            </div>
-
+            }
+          >
             {historyLoading && !history ? (
               <div className="flex items-center justify-center py-16">
                 <div className="animate-spin w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full" />
@@ -653,14 +849,14 @@ export default function MegaIndicatorPage() {
                 </ResponsiveContainer>
               </>
             )}
-          </div>
+          </ChartPanel>
 
           {/* ─── Contributions chart ───────────────────────────── */}
-          <div className="glass rounded-2xl p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold">Top Contributions to the Mega Score</h3>
-              <span className="text-xs text-[var(--muted)]">score × weight</span>
-            </div>
+          <ChartPanel
+            id="contributions"
+            title="Top Contributions to the Mega Score"
+            right={<span className="text-xs text-[var(--muted)]">score × weight</span>}
+          >
             <ResponsiveContainer width="100%" height={Math.max(180, Math.min(360, (view?.contributions.length || 0) * 26))}>
               <BarChart data={(view?.contributions || []).slice(0, 12)} layout="vertical" margin={{ left: 80, right: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--grid-stroke)" horizontal={false} />
@@ -674,12 +870,13 @@ export default function MegaIndicatorPage() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
-          </div>
+          </ChartPanel>
 
           {/* ─── Weight sliders grouped by category ────────────── */}
-          <div className="glass rounded-2xl p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <h3 className="text-sm font-semibold">Indicator Weights</h3>
+          <ChartPanel
+            id="weights"
+            title="Indicator Weights"
+            right={
               <div className="flex items-center gap-3">
                 <input
                   value={search}
@@ -691,8 +888,8 @@ export default function MegaIndicatorPage() {
                   Total weight: <b className="text-[var(--foreground)]">{totalEffectiveWeight.toFixed(1)}</b> across {data?.indicators.length} indicators
                 </span>
               </div>
-            </div>
-
+            }
+          >
             <div className="space-y-3">
               {Object.entries(grouped).map(([cat, items]) => {
                 const open = expandedCat === cat || search.length > 0;
@@ -776,11 +973,10 @@ export default function MegaIndicatorPage() {
                 );
               })}
             </div>
-          </div>
+          </ChartPanel>
 
           {/* ─── Category roll-up table ────────────────────────── */}
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold mb-4">Category Breakdown</h3>
+          <ChartPanel id="category" title="Category Breakdown">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -810,8 +1006,8 @@ export default function MegaIndicatorPage() {
                 </tbody>
               </table>
             </div>
-          </div>
-        </>
+          </ChartPanel>
+        </PanelBoard>
       )}
     </div>
   );

@@ -9,7 +9,9 @@ import type { ComparisonResult } from "@/lib/backtest-engine";
 const pct = (n: number, d = 1) => `${n.toFixed(d)}%`;
 
 const PRESETS = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ", "TSLA", "KO", "JPM"];
-const YEAR_OPTIONS = [1, 2, 3, 5, 10, 15, 20];
+const YEAR_OPTIONS = [1 / 12, 0.5, 1, 2, 3, 5, 10, 15, 20];
+// Sub-year windows render as months (1M / 6M), otherwise as years (2Y, 5Y…)
+const yearLabel = (y: number) => (y < 1 ? (Math.round(y * 12) === 1 ? "1M" : "6M") : `${y}Y`);
 
 export default function StrategyCompare() {
   const [ticker, setTicker] = useState("AAPL");
@@ -121,7 +123,7 @@ export default function StrategyCompare() {
               {YEAR_OPTIONS.map(y => (
                 <button key={y} onClick={() => setYears(y)}
                   className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${years === y ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
-                  {y}Y
+                  {yearLabel(y)}
                 </button>
               ))}
             </div>

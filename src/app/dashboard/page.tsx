@@ -6,6 +6,7 @@ import {
   Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
 import type { EnrichedPortfolio } from "@/lib/portfolio";
+import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 
 const fmt = (n: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
@@ -48,9 +49,9 @@ export default function DashboardPage() {
 
   const load = useCallback(() => {
     Promise.all([
-      fetch("/api/portfolio").then((r) => r.json()),
-      fetch("/api/watchlist").then((r) => r.json()),
-      fetch("/api/trades").then((r) => r.json()),
+      fetch("/api/portfolio", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/watchlist", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/trades", { cache: "no-store" }).then((r) => r.json()),
     ])
       .then(([pf, wl, tr]) => {
         setPortfolio(pf);
@@ -62,6 +63,14 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Live polling: refresh quotes/positions every 5s (idles when tab hidden)
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState !== "hidden") load();
+    }, 5000);
+    return () => clearInterval(t);
+  }, [load]);
 
   const totals = portfolio?.snapshot.totals;
   const positions = portfolio?.quoted ?? [];
@@ -91,7 +100,13 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h2 className="text-2xl font-bold">Portfolio Overview</h2>
+          <h2 className="text-2xl font-bold flex items-center gap-2">
+            Portfolio Overview
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-[var(--success)]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--success)] animate-pulse" />
+              LIVE · 5s
+            </span>
+          </h2>
           <p className="text-sm text-[var(--muted)]">Live view of your investments</p>
         </div>
         <div className="flex items-center gap-2">
@@ -124,13 +139,18 @@ export default function DashboardPage() {
             {kpi("Cash Available", fmt(portfolio?.snapshot.cashBalance ?? 0), `Dividends ${fmt(totals?.dividends ?? 0)}`)}
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <PanelBoard
+            boardKey="dashboard"
+            ids={["holdings", "allocation", "movers", "watchlist", "activity"]}
+            className="grid grid-cols-1 xl:grid-cols-6 gap-6"
+          >
             {/* Holdings snapshot */}
-            <div className="glass rounded-xl p-5 xl:col-span-2">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold">Holdings</h3>
-                <Link href="/dashboard/holdings" className="text-xs text-[var(--primary)] hover:underline">View all →</Link>
-              </div>
+            <ChartPanel
+              id="holdings"
+              title="Holdings"
+              className="xl:col-span-4"
+              right={<Link href="/dashboard/holdings" className="text-xs text-[var(--primary)] hover:underline">View all →</Link>}
+            >
               {positions.length === 0 ? (
                 <p className="text-sm text-[var(--muted)] text-center py-8">
                   No positions yet. Record your first trade to get started.
@@ -152,11 +172,10 @@ export default function DashboardPage() {
                   ))}
                 </div>
               )}
-            </div>
+            </ChartPanel>
 
             {/* Allocation */}
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold mb-2">Allocation</h3>
+            <ChartPanel id="allocation" title="Allocation" className="xl:col-span-2">
               {allocation.length > 0 ? (
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
@@ -174,13 +193,10 @@ export default function DashboardPage() {
               ) : (
                 <p className="text-sm text-[var(--muted)] text-center py-16">Nothing allocated yet.</p>
               )}
-            </div>
-          </div>
+            </ChartPanel>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
             {/* Top movers */}
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold mb-4">Today&apos;s Movers</h3>
+            <ChartPanel id="movers" title="Today's Movers" className="xl:col-span-3">
               {positions.length === 0 ? (
                 <p className="text-sm text-[var(--muted)] text-center py-6">No live positions.</p>
               ) : (
@@ -209,14 +225,15 @@ export default function DashboardPage() {
                   </div>
                 </div>
               )}
-            </div>
+            </ChartPanel>
 
             {/* Watchlist strip */}
-            <div className="glass rounded-xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold">Watchlist</h3>
-                <Link href="/dashboard/watchlist" className="text-xs text-[var(--primary)] hover:underline">Manage →</Link>
-              </div>
+            <ChartPanel
+              id="watchlist"
+              title="Watchlist"
+              className="xl:col-span-3"
+              right={<Link href="/dashboard/watchlist" className="text-xs text-[var(--primary)] hover:underline">Manage →</Link>}
+            >
               {watchlist.length === 0 ? (
                 <p className="text-sm text-[var(--muted)] text-center py-6">
                   Nothing watched. Add symbols on the Watchlist page.
@@ -237,16 +254,16 @@ export default function DashboardPage() {
                   })}
                 </div>
               )}
-            </div>
-          </div>
+            </ChartPanel>
 
-          {/* Recent trades */}
-          <div className="glass rounded-xl p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold">Recent Activity</h3>
-              <Link href="/dashboard/trades" className="text-xs text-[var(--primary)] hover:underline">Trade log →</Link>
-            </div>
-            {trades.length === 0 ? (
+            {/* Recent trades */}
+            <ChartPanel
+              id="activity"
+              title="Recent Activity"
+              className="xl:col-span-6"
+              right={<Link href="/dashboard/trades" className="text-xs text-[var(--primary)] hover:underline">Trade log →</Link>}
+            >
+              {trades.length === 0 ? (
               <p className="text-sm text-[var(--muted)] text-center py-6">No activity yet.</p>
             ) : (
               <div className="space-y-2">
@@ -260,7 +277,8 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-          </div>
+            </ChartPanel>
+          </PanelBoard>
         </>
       )}
     </div>

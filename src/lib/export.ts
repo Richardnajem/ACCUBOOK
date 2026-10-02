@@ -1,5 +1,5 @@
 // ─── CSV Export ─────────────────────────────────────────────────
-export function downloadCSV(filename: string, headers: string[], rows: (string | number)[][]) {
+export function downloadCSV(filename: string, headers: string[], rows: (string | number | null | undefined)[][]) {
   const csvContent = [
     headers.join(","),
     ...rows.map((row) =>
