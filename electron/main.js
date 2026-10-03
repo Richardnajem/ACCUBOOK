@@ -84,6 +84,8 @@ let mainWindow = null;
 let serverProcess = null;
 let quitting = false;
 let PORTABLE_DB_PATH = null; // set by setupDatabase() when packaged
+let DATA_DIR = null; // folder holding portable data + diagnostic logs
+let serverLogTail = ""; // last server output, for startup-failure diagnostics
 
 // ─── Single instance ────────────────────────────────────────────
 // Prevents two copies (each spawning their own Next server) fighting over the DB.
@@ -116,30 +118,71 @@ function getFreePort(start) {
   });
 }
 
+// Poll until the app's own API answers. Only a healthy (<400) response counts
+// — a 500 from a broken DB or a native module that won't load on this machine
+// is retried, its body captured, and surfaced after the timeout instead of
+// being treated as a successful start.
 function waitForServer(url, timeoutMs = 45000) {
   const started = Date.now();
+  let lastDetail = "";
   return new Promise((resolve, reject) => {
     const attempt = () => {
       const req = http.get(url, (res) => {
+        let body = "";
+        res.on("data", (c) => { if (body.length < 8000) body += c; });
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode < 400) return resolve();
+          lastDetail = `HTTP ${res.statusCode} — ${stripHtml(body).slice(0, 300)}`;
+          retryOrFail();
+        });
         res.resume();
-        resolve();
       });
-      req.on("error", () => {
-        if (Date.now() - started > timeoutMs) {
-          reject(new Error("Next server did not start in time"));
-        } else {
-          setTimeout(attempt, 500);
-        }
+      req.on("error", (err) => {
+        lastDetail = err.message;
+        retryOrFail();
       });
       req.setTimeout(2000, () => req.destroy(new Error("timeout")));
+    };
+    const retryOrFail = () => {
+      if (Date.now() - started > timeoutMs) {
+        reject(new Error(lastDetail ? `Server not healthy: ${lastDetail}` : "Next server did not start in time"));
+      } else {
+        setTimeout(attempt, 500);
+      }
     };
     attempt();
   });
 }
 
+function appendServerLog(chunk) {
+  serverLogTail = (serverLogTail + chunk.toString()).slice(-8000);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function stripHtml(s) {
+  return String(s).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function showFatalError(message) {
+  // Best-effort breadcrumb on disk so startup failures on other PCs can be
+  // reported and fixed (data dir is whatever setupDatabase() resolved to).
+  if (DATA_DIR) {
+    try {
+      fs.writeFileSync(
+        path.join(DATA_DIR, "server-last-error.log"),
+        `${new Date().toISOString()}\n${stripHtml(message)}\n\n--- server output ---\n${serverLogTail.trim()}\n`,
+      );
+    } catch { /* read-only disk etc. — the window still shows the details */ }
+  }
+  const logs = serverLogTail.trim();
+  const logBlock = logs
+    ? `<pre style="text-align:left;background:#18181b;color:#a1a1aa;font-size:11px;line-height:1.5;padding:12px;border-radius:8px;max-height:180px;overflow:auto;white-space:pre-wrap">${escapeHtml(logs.slice(-1200))}</pre><p style="color:#52525b;font-size:12px;margin-top:12px">These details were also saved to server-last-error.log in the app's data folder.</p>`
+    : "";
   const detail = encodeURIComponent(
-    `<html><body style="font-family:system-ui,sans-serif;background:#0a0a0f;color:#e4e4e7;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="max-width:480px;text-align:center;padding:24px"><h1 style="margin-bottom:8px">Stockfolio couldn't start</h1><p style="color:#a1a1aa;line-height:1.6">${message}</p></div></body></html>`,
+    `<html><body style="font-family:system-ui,sans-serif;background:#0a0a0f;color:#e4e4e7;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="max-width:600px;padding:24px"><h1 style="margin-bottom:8px">Stockfolio couldn't start</h1><p style="color:#a1a1aa;line-height:1.6">${message}</p>${logBlock}</div></body></html>`,
   );
   if (mainWindow) {
     mainWindow.loadURL(`data:text/html;charset=utf-8,${detail}`);
@@ -157,8 +200,17 @@ function showFatalError(message) {
 function setupDatabase() {
   try {
     if (isDev) return; // dev uses the project's own DB via cwd
-    const dataDir = path.join(PACKAGED_APP_DIR, "data");
+    // Single-file portable builds extract themselves to a %TEMP% folder at
+    // runtime — anything written next to process.resourcesPath there is wiped
+    // when the app exits. electron-builder's portable target sets
+    // PORTABLE_EXECUTABLE_DIR to the real folder containing the .exe, so keep
+    // data/ there: it persists and travels with the file when copied to
+    // another PC. Installed (NSIS) builds don't set that env var and keep
+    // data/ next to the installed app, as before.
+    const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR || PACKAGED_APP_DIR;
+    const dataDir = path.join(portableRoot, "data");
     fs.mkdirSync(dataDir, { recursive: true });
+    DATA_DIR = dataDir;
     const marker = path.join(dataDir, "portable.txt");
     if (!fs.existsSync(marker)) {
       fs.writeFileSync(marker, "Stockfolio portable data folder. Delete this folder to reset all data.\n");
@@ -183,6 +235,7 @@ function setupDatabase() {
     try {
       const dataDir = path.join(app.getPath("userData"), "data");
       fs.mkdirSync(dataDir, { recursive: true });
+      DATA_DIR = dataDir;
       PORTABLE_DB_PATH = path.join(dataDir, "portfolio.db");
     } catch (err2) {
       console.error("userData fallback also failed:", err2);
@@ -204,12 +257,15 @@ function startProductionServer() {
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    serverProcess.stdout.on("data", appendServerLog);
+    serverProcess.stderr.on("data", appendServerLog);
     serverProcess.on("error", (err) => {
       console.error("Server process error:", err);
+      appendServerLog(`\n[spawn error] ${err.message}\n`);
     });
     serverProcess.on("exit", (code) => {
       if (!quitting && code !== 0 && code !== null) {
-        showFatalError(`The internal server exited unexpectedly (code ${code}). Please reinstall the application.`);
+        showFatalError(`The internal server exited unexpectedly (code ${code}).`);
       }
     });
     return waitForServer(`http://${HOST}:${PORT}/api/trades`);
@@ -285,7 +341,7 @@ function createWindow() {
       .then(() => mainWindow.loadURL(`http://${HOST}:${PORT}/dashboard`))
       .catch((err) => {
         console.error(err);
-        showFatalError("The internal server could not start. Please reinstall the application.");
+        showFatalError(`The internal server could not start.${err && err.message ? `<br><span style="font-size:13px;color:#71717a">${escapeHtml(err.message)}</span>` : ""}`);
       });
   }
 

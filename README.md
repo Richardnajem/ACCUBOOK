@@ -116,6 +116,22 @@ with extra indicator columns, or bare headerless tables). It is deliberately fle
 everywhere. The SQLite database (`portfolio.db`) is **not** in git — a demo portfolio is
 seeded on first run, and you can restore your own data via in-app Backup / Restore.
 
+### Portable exe on another PC
+
+`release/Stockfolio-Portable-<version>.exe` is a single self-contained file — no Node.js,
+no installer, no VC++ redistributable needed (Windows 10/11, 64-bit). A few things to know:
+
+- **SmartScreen**: the build is unsigned, so the first run may show "Windows protected your
+  PC" — click *More info → Run anyway*.
+- **First run is slow**: the exe unpacks itself (hundreds of MB) before the window appears.
+  Later runs are faster.
+- **Your data travels with the file**: it lives in a `data/` folder created next to the exe.
+  Copy that folder together with the exe when moving to another PC (installed builds keep
+  data next to the installation, falling back to the OS userData folder if that's
+  read-only).
+- **If it fails to start**: the error window shows the server output, and the same details
+  are saved to `server-last-error.log` inside the app's data folder.
+
 ## Packaging
 
 ```bash

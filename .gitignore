@@ -61,3 +61,12 @@ tests/electron/update-sim/dist/
 tests/electron/update-sim/feed/
 tests/electron/update-sim/node_modules/
 release/
+
+# local test/smoke artifacts
+.smoke/
+.tmp-symlink-probe/
+
+# built exes live in release/ (gitignored); never let a stray copy in the
+# project root block pushes — GitHub rejects files over 100 MB
+/Stockfolio-Portable-*.exe
+/Stockfolio-Setup-*.exe

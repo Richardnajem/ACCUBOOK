@@ -1,6 +1,6 @@
 {
   "name": "stockfolio",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "Stockfolio — local-first portfolio manager by Richard Najem",
   "author": "Richard Najem <richard2.najem@gmail.com>",
@@ -64,6 +64,8 @@
     "files": [
       "electron/**/*",
       ".next/**/*",
+      "!.next/dev/**",
+      "!.next/cache/**",
       "public/**/*",
       "package.json"
     ],
