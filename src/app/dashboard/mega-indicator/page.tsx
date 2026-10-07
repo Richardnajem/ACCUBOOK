@@ -7,6 +7,17 @@ import {
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
 import { scoreColor, scoreLabel, WeightMap } from "@/lib/mega-indicator";
+import {
+  scoreWithOverride,
+  mergeFormula,
+  isFormulaChanged,
+  loadOverrides,
+  saveOverrides,
+  setOverride as setFormulaOverride,
+  clearOverride as clearFormulaOverride,
+  formulaLabel,
+  type ScoreOverrideMap,
+} from "@/lib/mega-overrides";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 
 interface MegaIndicator {
@@ -234,6 +245,10 @@ export default function MegaIndicatorPage() {
   const weightsInitRef = useRef(false);
   const prevPriceRef = useRef<number | null>(null);
   const [search, setSearch] = useState("");
+  // Per-indicator formula overrides (right-click editor) — persisted locally.
+  // Lazy-initialised (loadOverrides guards SSR) so no setState-in-effect is needed.
+  const [overrides, setOverrides] = useState<ScoreOverrideMap>(() => loadOverrides());
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
 
   // ─── Score-over-time history ───────────────────────────────────
   const [history, setHistory] = useState<MegaHistoryResponse | null>(null);
@@ -302,6 +317,16 @@ export default function MegaIndicatorPage() {
     } catch { /* storage unavailable — ignore */ }
   }, [weights, preset, ticker]);
 
+  // Persist per-indicator formula overrides on every change.
+  useEffect(() => { saveOverrides(overrides); }, [overrides]);
+  // Escape closes the right-click formula editor.
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+
   // Fetch score history when ticker or horizon changes (weights intentionally
   // NOT a dependency — even-weight history is cached and instant; refetching on
   // every slider move would be slow and noisy).
@@ -367,11 +392,24 @@ export default function MegaIndicatorPage() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [ticker]);
 
+  // Indicators with their score re-normalized through the user's formula
+  // overrides (right-click editor). No override → the server object is returned
+  // unchanged, so default accuracy is identical to before.
+  const scored = useMemo(() => {
+    if (!data) return [];
+    return data.indicators.map((i) => {
+      const ov = overrides[i.id];
+      if (!ov) return i;
+      const s = scoreWithOverride(i.value, { direction: i.direction, thresholds: i.thresholds }, ov);
+      return { ...i, score: Math.round(s * 10) / 10 };
+    });
+  }, [data, overrides]);
+
   // Local live recompute of the composite from weights (instant slider feedback),
   // while the server value is the source of truth after each fetch.
   const view = useMemo(() => {
     if (!data) return null;
-    const enabled = data.indicators.filter((i) => (weights[i.id] ?? 1) > 0);
+    const enabled = scored.filter((i) => (weights[i.id] ?? 1) > 0);
     const tw = enabled.reduce((s, i) => s + (weights[i.id] ?? 1), 0);
     const score = tw > 0 ? enabled.reduce((s, i) => s + i.score * (weights[i.id] ?? 1), 0) / tw : 50;
     const cats: Record<string, { ws: number; wsum: number }> = {};
@@ -393,7 +431,7 @@ export default function MegaIndicatorPage() {
         .sort((a, b) => b.weightShare - a.weightShare),
       contributions,
     };
-  }, [data, weights]);
+  }, [data, scored, weights]);
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -419,15 +457,24 @@ export default function MegaIndicatorPage() {
     [data, weights]
   );
 
+  // How many indicators currently have a custom (right-click) formula.
+  const customFormulaCount = useMemo(
+    () =>
+      (data?.indicators || []).filter((i) =>
+        isFormulaChanged({ direction: i.direction, thresholds: i.thresholds }, overrides[i.id])
+      ).length,
+    [data, overrides]
+  );
+
   const grouped = useMemo(() => {
     const g: Record<string, MegaIndicator[]> = {};
-    for (const i of data?.indicators || []) {
+    for (const i of scored) {
       if (search && !i.name.toLowerCase().includes(search.toLowerCase())) continue;
       if (!g[i.category]) g[i.category] = [];
       g[i.category].push(i);
     }
     return g;
-  }, [data, search]);
+  }, [scored, search]);
 
   const radarData = (view?.categories || [])
     .filter((c) => c.weightShare > 0)
@@ -886,7 +933,17 @@ export default function MegaIndicatorPage() {
                 />
                 <span className="text-xs text-[var(--muted)]">
                   Total weight: <b className="text-[var(--foreground)]">{totalEffectiveWeight.toFixed(1)}</b> across {data?.indicators.length} indicators
+                  <span className="hidden sm:inline"> · right-click an indicator to edit its formula</span>
                 </span>
+                {customFormulaCount > 0 && (
+                  <button
+                    onClick={() => setOverrides({})}
+                    title="Reset every custom formula back to the defaults"
+                    className="text-xs px-2 py-1 rounded border border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10"
+                  >
+                    Reset {customFormulaCount} formula{customFormulaCount > 1 ? "s" : ""}
+                  </button>
+                )}
               </div>
             }
           >
@@ -921,7 +978,10 @@ export default function MegaIndicatorPage() {
                           const w = weights[ind.id] ?? 1;
                           const wPct = totalEffectiveWeight > 0 ? (Math.max(0, w) / totalEffectiveWeight) * 100 : 0;
                           return (
-                            <div key={ind.id} className={`px-4 py-3 transition-colors ${w <= 0 ? "opacity-50" : w > 1 ? "bg-indigo-500/[0.04]" : ""}`}>
+                            <div key={ind.id}
+                              onContextMenu={(e) => { e.preventDefault(); setMenu({ id: ind.id, x: e.clientX, y: e.clientY }); }}
+                              title="Right-click to edit this indicator's formula"
+                              className={`px-4 py-3 transition-colors cursor-context-menu ${w <= 0 ? "opacity-50" : w > 1 ? "bg-indigo-500/[0.04]" : ""}`}>
                               <div className="flex flex-wrap items-center gap-3">
                                 {/* Name + value */}
                                 <div className="min-w-0 flex-1 basis-56">
@@ -964,6 +1024,14 @@ export default function MegaIndicatorPage() {
                                 </div>
                               </div>
                               <p className="text-[10px] text-[var(--muted)] mt-1 line-clamp-1">{ind.description}</p>
+                              <p className="text-[10px] mt-0.5 flex items-center gap-1.5">
+                                <span className="text-[var(--muted)]">
+                                  ƒ {formulaLabel(mergeFormula({ direction: ind.direction, thresholds: ind.thresholds }, overrides[ind.id]))}
+                                </span>
+                                {isFormulaChanged({ direction: ind.direction, thresholds: ind.thresholds }, overrides[ind.id]) && (
+                                  <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300">custom</span>
+                                )}
+                              </p>
                             </div>
                           );
                         })}
@@ -1009,6 +1077,111 @@ export default function MegaIndicatorPage() {
           </ChartPanel>
         </PanelBoard>
       )}
+
+      {/* Right-click formula editor for a single indicator */}
+      {menu && data && (() => {
+        const ind = data.indicators.find((i) => i.id === menu.id);
+        if (!ind) return null;
+        const base = { direction: ind.direction, thresholds: ind.thresholds };
+        const ov = overrides[ind.id] || {};
+        const eff = mergeFormula(base, ov);
+        const changed = isFormulaChanged(base, ov);
+        const px = typeof window !== "undefined" ? Math.min(menu.x, window.innerWidth - 300) : menu.x;
+        const py = typeof window !== "undefined" ? Math.min(menu.y, window.innerHeight - 350) : menu.y;
+        const w = weights[ind.id] ?? 1;
+        return (
+          <div
+            className="fixed inset-0 z-50"
+            onClick={() => setMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
+          >
+            <div
+              className="absolute w-72 rounded-xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-3 text-xs space-y-2"
+              style={{ left: Math.max(8, px), top: Math.max(8, py) }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-sm truncate" title={ind.name}>{ind.name}</span>
+                <button onClick={() => setMenu(null)} className="text-[var(--muted)] hover:text-[var(--foreground)]" aria-label="Close">✕</button>
+              </div>
+              <p className="text-[10px] text-[var(--muted)]">
+                Formula: <b className={changed ? "text-indigo-300" : "text-[var(--foreground)]"}>{formulaLabel(eff)}</b>
+              </p>
+
+              <label className="block">
+                <span className="text-[10px] text-[var(--muted)]">Weight</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range" min={0} max={10} step={0.5}
+                    value={Math.min(10, w)}
+                    onChange={(e) => setWeight(ind.id, Number(e.target.value))}
+                    className="flex-1 accent-indigo-500"
+                  />
+                  <input
+                    type="number" min={0} max={20} step={0.5}
+                    value={w}
+                    onChange={(e) => setWeight(ind.id, Math.max(0, Number(e.target.value)))}
+                    className="w-16 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded tabular-nums focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="text-[10px] text-[var(--muted)]">Direction (what scores better)</span>
+                <select
+                  value={eff.direction}
+                  onChange={(e) => setOverrides((m) => setFormulaOverride(m, ind.id, { direction: e.target.value as "higher" | "lower" | "band" }))}
+                  className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                >
+                  <option value="higher">Higher is better</option>
+                  <option value="lower">Lower is better</option>
+                  <option value="band">Healthy band (peak in the middle)</option>
+                </select>
+              </label>
+
+              <div className="flex items-end gap-2">
+                <label className="flex-1">
+                  <span className="text-[10px] text-[var(--muted)]">{eff.direction === "higher" ? "Bad (→0)" : eff.direction === "lower" ? "Good (→100)" : "Band low"}</span>
+                  <input
+                    type="number" step="any"
+                    value={eff.thresholds[0]}
+                    onChange={(e) => setOverrides((m) => setFormulaOverride(m, ind.id, { thresholds: [Number(e.target.value), eff.thresholds[1]] }))}
+                    className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded tabular-nums focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </label>
+                <label className="flex-1">
+                  <span className="text-[10px] text-[var(--muted)]">{eff.direction === "higher" ? "Good (→100)" : eff.direction === "lower" ? "Bad (→0)" : "Band high"}</span>
+                  <input
+                    type="number" step="any"
+                    value={eff.thresholds[1]}
+                    onChange={(e) => setOverrides((m) => setFormulaOverride(m, ind.id, { thresholds: [eff.thresholds[0], Number(e.target.value)] }))}
+                    className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded tabular-nums focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <button
+                  onClick={() => setOverrides((m) => clearFormulaOverride(m, ind.id))}
+                  disabled={!changed}
+                  className="px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Reset formula
+                </button>
+                <button
+                  onClick={() => { setWeight(ind.id, 0); setMenu(null); }}
+                  className="px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+                >
+                  Exclude
+                </button>
+              </div>
+              <p className="text-[10px] text-[var(--muted)]">
+                Raw {ind.value.toLocaleString(undefined, { maximumFractionDigits: 3 })}{ind.unit !== "$" ? ` ${ind.unit}` : ""} → score {scoreWithOverride(ind.value, base, ov).toFixed(1)}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
