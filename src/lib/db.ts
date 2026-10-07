@@ -21,6 +21,31 @@ export function getDb(): Database.Database {
   return db;
 }
 
+// Price-history cache tables. Owned by the schema module (and created on
+// EVERY first run, not lazily): a brand-new database — fresh PC, first
+// launch — used to answer /api/data with "no such table: price_bars",
+// because market-data.ts only created these when a price fetch happened.
+export const PRICE_TABLES_SQL = `
+  CREATE TABLE IF NOT EXISTS price_bars (
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    PRIMARY KEY (symbol, date)
+  );
+  CREATE TABLE IF NOT EXISTS price_meta (
+    symbol TEXT PRIMARY KEY,
+    name TEXT,
+    currency TEXT,
+    exchange TEXT,
+    last_refreshed TEXT,
+    source TEXT
+  );
+`;
+
 function initializeDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS trades (
@@ -52,6 +77,9 @@ function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  // Same statement market-data.ts runs, so there is exactly one definition
+  // of these tables and both connections see them.
+  db.exec(PRICE_TABLES_SQL);
 }
 
 // ─── App settings (key-value; panel layouts, misc prefs) ────────

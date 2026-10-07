@@ -9,6 +9,9 @@
 
 import Database from "better-sqlite3";
 import path from "path";
+// Relative on purpose: this module is also imported from Vitest tests,
+// which resolve no `@/` alias.
+import { PRICE_TABLES_SQL } from "./db";
 
 const DB_PATH =
   process.env.STOCKFOLIO_DB_PATH ||
@@ -40,26 +43,10 @@ export function getCacheDb(): Database.Database {
   if (!cacheDb) {
     cacheDb = new Database(DB_PATH);
     cacheDb.pragma("journal_mode = WAL");
-    cacheDb.exec(`
-      CREATE TABLE IF NOT EXISTS price_bars (
-        symbol TEXT NOT NULL,
-        date TEXT NOT NULL,
-        open REAL NOT NULL,
-        high REAL NOT NULL,
-        low REAL NOT NULL,
-        close REAL NOT NULL,
-        volume REAL NOT NULL,
-        PRIMARY KEY (symbol, date)
-      );
-      CREATE TABLE IF NOT EXISTS price_meta (
-        symbol TEXT PRIMARY KEY,
-        name TEXT,
-        currency TEXT,
-        exchange TEXT,
-        last_refreshed TEXT,
-        source TEXT
-      );
-    `);
+    // Single definition of these tables lives in lib/db.ts, which creates
+    // them on the very first run too — so a brand-new database never fails
+    // a query against price_bars / price_meta before the first fetch.
+    cacheDb.exec(PRICE_TABLES_SQL);
     // Migration for caches created before the `source` column existed.
     try { cacheDb.exec("ALTER TABLE price_meta ADD COLUMN source TEXT"); } catch { /* column exists */ }
   }
