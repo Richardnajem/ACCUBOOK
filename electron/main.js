@@ -1,9 +1,18 @@
+// First line of the file: everything below (Electron's own bootstrap, the
+// requires, the window, the internal server) is measured from here so startup
+// regressions show up in the console instead of being guessed at.
+const LAUNCH_T0 = Date.now();
+function mark(label) {
+  console.log(`[startup] +${Date.now() - LAUNCH_T0}ms ${label}`);
+}
+
 const { app, BrowserWindow, nativeImage, ipcMain } = require("electron");
 const path = require("path");
 const net = require("net");
 const http = require("http");
 const fs = require("fs");
 const { spawn } = require("child_process");
+mark("main process modules loaded");
 
 // Updates are 100% MANUAL. The app never checks for updates on its own —
 // the only check happens when the user clicks "Check for Updates" in
@@ -11,53 +20,65 @@ const { spawn } = require("child_process");
 // the update downloads, and installs on the next app quit (or on demand).
 // Safe on every PC: if this no-ops (dev mode, offline, no releases yet),
 // the Settings page just says "Up to date" or "Couldn't check".
+// electron-updater is required LAZILY — first "Check for Updates" click, not
+// at boot. It drags js-yaml + builder-util-runtime in with it, and that cost
+// was paid on every single launch by a feature only ever used from one button.
 let autoUpdater = null;
-try {
-  autoUpdater = require("electron-updater").autoUpdater;
-  autoUpdater.autoDownload = false;          // never download without the user asking
-  autoUpdater.autoInstallOnAppQuit = false;  // never swap binaries silently
-  autoUpdater.on("update-available", (info) => {
-    if (mainWindow) {
-      mainWindow.webContents.send("update-status", { type: "available", version: info.version });
-    }
-  });
-  autoUpdater.on("update-not-available", (info) => {
-    if (mainWindow) {
-      mainWindow.webContents.send("update-status", { type: "up-to-date", version: info?.version });
-    }
-  });
-  autoUpdater.on("error", () => {
-    if (mainWindow) mainWindow.webContents.send("update-status", { type: "error" });
-  });
-  autoUpdater.on("download-progress", (p) => {
-    if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloading", percent: Math.round(p.percent) });
-  });
-  autoUpdater.on("update-downloaded", (info) => {
-    if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloaded", version: info?.version });
-  });
-} catch {
-  // electron-updater not installed / not packaged yet — ignore
+let updaterLoadAttempted = false;
+function getAutoUpdater() {
+  if (autoUpdater || updaterLoadAttempted) return autoUpdater;
+  updaterLoadAttempted = true;
+  try {
+    autoUpdater = require("electron-updater").autoUpdater;
+    autoUpdater.autoDownload = false;          // never download without the user asking
+    autoUpdater.autoInstallOnAppQuit = false;  // never swap binaries silently
+    autoUpdater.on("update-available", (info) => {
+      if (mainWindow) {
+        mainWindow.webContents.send("update-status", { type: "available", version: info.version });
+      }
+    });
+    autoUpdater.on("update-not-available", (info) => {
+      if (mainWindow) {
+        mainWindow.webContents.send("update-status", { type: "up-to-date", version: info?.version });
+      }
+    });
+    autoUpdater.on("error", () => {
+      if (mainWindow) mainWindow.webContents.send("update-status", { type: "error" });
+    });
+    autoUpdater.on("download-progress", (p) => {
+      if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloading", percent: Math.round(p.percent) });
+    });
+    autoUpdater.on("update-downloaded", (info) => {
+      if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloaded", version: info?.version });
+    });
+  } catch {
+    // electron-updater not installed / not packaged yet — ignore
+  }
+  return autoUpdater;
 }
 
 // Manual-only check, invoked from the Settings page.
 function checkForUpdates() {
-  if (!autoUpdater || app.isPackaged !== true) {
+  const updater = getAutoUpdater();
+  if (!updater || app.isPackaged !== true) {
     if (mainWindow) mainWindow.webContents.send("update-status", { type: "up-to-date" });
     return;
   }
   // Network/publish-config errors surface as the "error" status above.
-  autoUpdater.checkForUpdates().catch(() => {});
+  updater.checkForUpdates().catch(() => {});
 }
 
 function downloadUpdate() {
-  if (!autoUpdater || app.isPackaged !== true) return;
-  autoUpdater.downloadUpdate().catch(() => {});
+  const updater = getAutoUpdater();
+  if (!updater || app.isPackaged !== true) return;
+  updater.downloadUpdate().catch(() => {});
 }
 
 function installUpdate() {
-  if (!autoUpdater || app.isPackaged !== true) return;
+  const updater = getAutoUpdater();
+  if (!updater || app.isPackaged !== true) return;
   quitting = true;
-  autoUpdater.quitAndInstall(false, true);
+  updater.quitAndInstall(false, true);
 }
 
 // IPC surface for the renderer (Settings page).
@@ -100,7 +121,10 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    mark("electron ready");
+    createWindow();
+  });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -147,7 +171,10 @@ function waitForServer(url, timeoutMs = 45000) {
       if (Date.now() - started > timeoutMs) {
         reject(new Error(lastDetail ? `Server not healthy: ${lastDetail}` : "Next server did not start in time"));
       } else {
-        setTimeout(attempt, 500);
+        // Poll quickly so the window swaps to the real UI the instant the server
+        // is ready (was 500ms, then 150ms — each step shaved real time off the
+        // splash; 50ms keeps the wakeup cost negligible on any machine).
+        setTimeout(attempt, 50);
       }
     };
     attempt();
@@ -156,6 +183,21 @@ function waitForServer(url, timeoutMs = 45000) {
 
 function appendServerLog(chunk) {
   serverLogTail = (serverLogTail + chunk.toString()).slice(-8000);
+}
+
+// Fire the dashboard's own data requests the moment the server is healthy,
+// while the window is still loading /dashboard. /api/portfolio is the slow one
+// on a cold start (live quotes for every position, ~1-2s) and it is what the
+// dashboard's spinner waits on — warming it here means the fetch the page makes
+// a moment later usually lands in the in-memory quote cache and returns fast.
+// Failures are irrelevant: the page always asks for the data itself.
+function warmDashboardData(base) {
+  for (const p of ["/api/portfolio", "/api/watchlist", "/api/trades"]) {
+    const req = http.get(base + p, (res) => res.resume());
+    req.on("error", () => {});
+    req.setTimeout(20000, () => req.destroy());
+  }
+  mark("dashboard data warm-up started");
 }
 
 function escapeHtml(s) {
@@ -268,7 +310,11 @@ function startProductionServer() {
         showFatalError(`The internal server exited unexpectedly (code ${code}).`);
       }
     });
-    return waitForServer(`http://${HOST}:${PORT}/api/trades`);
+    mark("internal server process spawned");
+    // Readiness probe = /dashboard itself: it is prerendered static HTML, so
+    // it answers without touching the database, and probing it means the page
+    // the window is about to show is already rendered and on disk.
+    return waitForServer(`http://${HOST}:${PORT}/dashboard`);
   });
 }
 
@@ -286,6 +332,28 @@ function attachDevServerWatch() {
   }, 10000);
 }
 
+// Lightweight inline splash shown immediately on launch, while the bundled
+// Next.js server boots in the background. Without it the window stays hidden
+// until the server is healthy, which is what made the exe feel slow to open.
+function showLoadingSplash() {
+  if (!mainWindow) return;
+  const html = `<html><head><meta charset="utf-8"><style>
+    html,body{margin:0;height:100%;background:#0a0a0f;color:#e4e4e7;
+      font-family:system-ui,-apple-system,Segoe UI,sans-serif;}
+    .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+    .logo{font-size:26px;font-weight:700;letter-spacing:.5px}
+    .logo span{color:#6366f1}
+    .spinner{width:34px;height:34px;border:3px solid #27272a;border-top-color:#6366f1;border-radius:50%;animation:s .8s linear infinite}
+    @keyframes s{to{transform:rotate(360deg)}}
+    .hint{color:#71717a;font-size:12px}
+  </style></head><body><div class="wrap">
+    <div class="logo">Stock<span>folio</span></div>
+    <div class="spinner"></div>
+    <div class="hint">Starting up…</div>
+  </div></body></html>`;
+  mainWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+}
+
 function createWindow() {
   setupDatabase();
 
@@ -297,7 +365,10 @@ function createWindow() {
     title: "Stockfolio — Portfolio Manager by Richard Najem",
     backgroundColor: "#0a0a0f",
     autoHideMenuBar: true,
-    show: false,
+    // Show the frame the moment it exists instead of waiting for "ready-to-show"
+    // (which needs a first paint). backgroundColor matches the splash so there
+    // is no white flash — the window simply appears sooner.
+    show: true,
     icon: getIcon(),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -307,8 +378,6 @@ function createWindow() {
     },
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
-
   // NOTE: deliberately no update check on startup — updates are manual only
   // (Settings → Check for Updates).
 
@@ -317,6 +386,12 @@ function createWindow() {
     if (isMainFrame) {
       showFatalError(`Could not load the app.<br><span style="font-size:13px;color:#71717a">${code} ${desc}</span>`);
     }
+  });
+
+  // Timing breadcrumb: when the real dashboard (not the splash) has painted.
+  mainWindow.webContents.on("did-finish-load", () => {
+    const url = mainWindow.webContents.getURL();
+    if (url.startsWith("http://") && url.includes("/dashboard")) mark("dashboard finished loading");
   });
 
   // Block navigation away from the local app.
@@ -329,16 +404,29 @@ function createWindow() {
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
+  // Show something instantly, then swap to the app when the server is ready.
+  showLoadingSplash();
+  mark("window visible with splash");
+
   if (isDev) {
     // Dev: `npm run dev:electron` starts `next dev -p 3457` alongside Electron.
     // Bare `electron .` also works if the dev server is already running.
-    waitForServer(`http://localhost:${DEV_PORT}/api/trades`, 30000)
-      .then(() => mainWindow.loadURL(`http://localhost:${DEV_PORT}/dashboard`))
+    waitForServer(`http://localhost:${DEV_PORT}/dashboard`, 30000)
+      .then(() => {
+        mark("dev server healthy");
+        mainWindow.loadURL(`http://localhost:${DEV_PORT}/dashboard`);
+      })
       .catch(() => showFatalError(`Could not reach the dev server on port ${DEV_PORT}.<br>Run <code>npm run dev:electron</code>, or <code>npm run dev</code> first, then the Electron window.`));
     attachDevServerWatch();
   } else {
     startProductionServer()
-      .then(() => mainWindow.loadURL(`http://${HOST}:${PORT}/dashboard`))
+      .then(() => {
+        mark("internal server healthy");
+        // Kick off the dashboard's API calls now, in parallel with the page
+        // load — the spinner the page shows is usually over before it starts.
+        warmDashboardData(`http://${HOST}:${PORT}`);
+        mainWindow.loadURL(`http://${HOST}:${PORT}/dashboard`);
+      })
       .catch((err) => {
         console.error(err);
         showFatalError(`The internal server could not start.${err && err.message ? `<br><span style="font-size:13px;color:#71717a">${escapeHtml(err.message)}</span>` : ""}`);
