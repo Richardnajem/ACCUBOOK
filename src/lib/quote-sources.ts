@@ -277,7 +277,8 @@ export async function tradingViewQuote(sym: string, exchangeHint?: string | null
     const json = await res.json();
     const row = json?.data?.[0]?.d;
     if (!row) throw new Error("no data");
-    const [close, change, prePrice, preChange, prePct, postPrice, postChange, postPct, lastTrade, volume, high, low] = row;
+    // Positional: dropping the unused bindings keeps the mapping identical.
+    const [close, change, prePrice, prePct, postPrice, postPct, volume, high, low] = row;
     // Pick whichever extended field is non-null; fall back to regular close.
     let price = num(close);
     let changePercent = num(change);

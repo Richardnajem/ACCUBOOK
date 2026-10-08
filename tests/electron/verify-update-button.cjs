@@ -190,7 +190,7 @@ async function waitForText(ws, pattern, timeoutMs) {
         });
         return seen;
       })()`,
-    ).catch(async (e) => {
+    ).catch(async () => {
       // CDP gave up — read whatever the page recorded before it did.
       return await evaluate(ws, `window.__updStatuses || []`).catch(() => []);
     });

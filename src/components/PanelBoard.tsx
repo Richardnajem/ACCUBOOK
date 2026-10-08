@@ -115,11 +115,6 @@ export function PanelBoard({ boardKey, ids, className = "grid grid-cols-1 xl:gri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardKey]);
 
-  const persist = useCallback((next: PanelLayoutState) => {
-    setState(next);
-    saveLayout(boardKey, next);
-  }, [boardKey]);
-
   const sensors = useSensors(
     // distance: 6 so clicking the header buttons never starts a drag
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),

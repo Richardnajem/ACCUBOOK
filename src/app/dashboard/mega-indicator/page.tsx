@@ -71,31 +71,6 @@ interface MegaResponse {
   error?: string;
 }
 
-interface LiveQuote {
-  symbol: string;
-  name: string | null;
-  currency: string;
-  exchange: string | null;
-  price: number | null;
-  previousClose: number | null;
-  change: number | null;
-  changePercent: number | null;
-  dayHigh: number | null;
-  dayLow: number | null;
-  yearHigh: number | null;
-  yearLow: number | null;
-  volume: number | null;
-  marketState: string | null;
-  preMarket: number | null;
-  postMarket: number | null;
-  quoteTime: number | null;
-  displayPrice: number | null;
-  displayChange: number | null;
-  displayChangePercent: number | null;
-  displaySession: "pre" | "regular" | "post" | null;
-  lastTradeTime: number | null;
-}
-
 interface SparkPoint { t: number; price: number; }
 
 interface MegaHistoryPoint {
@@ -196,8 +171,6 @@ function loadStored<T>(key: string, fallback: T): T {
   }
 }
 
-const fmt = (n: number | null) =>
-  n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 const pct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`);
 
 const categoryIcons: Record<string, string> = {

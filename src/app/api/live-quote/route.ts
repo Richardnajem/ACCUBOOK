@@ -16,10 +16,6 @@ export const dynamic = "force-dynamic";
 // The Yahoo path also provides the intraday 1m sparkline (60s TTL cache) and
 // remains the fallback if every multi-source provider fails.
 
-interface VerificationDTO {
-  priceHint?: number | null;
-}
-
 interface SourceQuoteDTO {
   source: string;
   ok: boolean;

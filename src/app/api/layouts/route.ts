@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSetting, setSetting, getSettingsByPrefix } from "@/lib/db";
+import { setSetting, getSettingsByPrefix } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
