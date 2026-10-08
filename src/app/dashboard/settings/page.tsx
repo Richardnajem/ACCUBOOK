@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type UpdateStatus =
   | { type: "idle" }
@@ -9,7 +9,7 @@ type UpdateStatus =
   | { type: "available"; version: string }
   | { type: "downloading"; percent: number }
   | { type: "downloaded"; version?: string }
-  | { type: "error" };
+  | { type: "error"; message?: string };
 
 interface ElectronUpdatesAPI {
   isPackaged: () => Promise<boolean>;
@@ -21,17 +21,18 @@ interface ElectronUpdatesAPI {
 }
 
 export default function SettingsPage() {
-  const [isElectron, setIsElectron] = useState(false);
+  // The preload bridge exists before the page's first render in Electron and
+  // is absent in a plain browser — no effect needed to discover it.
+  const [isElectron] = useState(
+    () => typeof window !== "undefined" && !!(window as unknown as { electronAPI?: { updates?: ElectronUpdatesAPI } }).electronAPI?.updates,
+  );
   const [isPackaged, setIsPackaged] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [status, setStatus] = useState<UpdateStatus>({ type: "idle" });
-  const statusRef = useRef<UpdateStatus>(status);
-  statusRef.current = status;
 
   useEffect(() => {
     const api = (window as unknown as { electronAPI?: { updates?: ElectronUpdatesAPI } }).electronAPI?.updates;
     if (!api) return; // browser mode: updates don't apply
-    setIsElectron(true);
     let unsubscribe: (() => void) | undefined;
     (async () => {
       const [packaged, version] = await Promise.all([api.isPackaged(), api.getVersion()]);
@@ -218,8 +219,15 @@ function UpdateControls({
     case "error":
       return (
         <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-sm text-red-400">Couldn&apos;t check for updates (offline? no release published yet?).</span>
+          <span className="text-sm text-red-400">
+            Couldn&apos;t check for updates (offline? no release published yet?).
+          </span>
           <button onClick={onCheck} className="btn-secondary">Retry</button>
+          {status.message && (
+            <span className="w-full text-xs text-[var(--muted)] font-mono break-all">
+              {status.message}
+            </span>
+          )}
         </div>
       );
   }

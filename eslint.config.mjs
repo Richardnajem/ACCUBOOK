@@ -5,6 +5,15 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  // The Electron main process, the preload script and the node scripts/tests
+  // that drive them are CommonJS on purpose — require() is the module system
+  // there, not a style choice, so the TS-flavoured rule is noise for them.
+  {
+    files: ["electron/**/*.js", "scripts/**/*.{js,cjs}", "tests/electron/**/*.cjs", "**/*.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

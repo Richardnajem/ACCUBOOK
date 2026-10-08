@@ -42,8 +42,16 @@ function getAutoUpdater() {
         mainWindow.webContents.send("update-status", { type: "up-to-date", version: info?.version });
       }
     });
-    autoUpdater.on("error", () => {
-      if (mainWindow) mainWindow.webContents.send("update-status", { type: "error" });
+    autoUpdater.on("error", (error) => {
+      // Carry the reason through: "offline? no release published yet?" is a
+      // guess, and the real message (missing app-update.yml, 404, TLS) is what
+      // makes a failed check diagnosable.
+      if (mainWindow) {
+        mainWindow.webContents.send("update-status", {
+          type: "error",
+          message: String((error && error.message) || error || "unknown error"),
+        });
+      }
     });
     autoUpdater.on("download-progress", (p) => {
       if (mainWindow) mainWindow.webContents.send("update-status", { type: "downloading", percent: Math.round(p.percent) });
@@ -293,8 +301,13 @@ function setupDatabase() {
 function startProductionServer() {
   return getFreePort(PORT).then((port) => {
     PORT = port;
+    // cwd must be a REAL directory: packaged, APP_ROOT is the app.asar archive
+    // (a file), and spawn() fails with ENOENT when the cwd doesn't exist. The
+    // server finds the project through STOCKFOLIO_APP_ROOT, never through cwd,
+    // so pointing it at the archive's folder is enough.
+    const serverCwd = APP_ROOT.endsWith(".asar") ? path.dirname(APP_ROOT) : APP_ROOT;
     serverProcess = spawn(process.execPath, [path.join(__dirname, "next-server.js")], {
-      cwd: APP_ROOT,
+      cwd: serverCwd,
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",

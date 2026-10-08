@@ -148,14 +148,27 @@ function startFakeFeed(dir, port) {
   checkPublishConfig();
   checkVersionLogic();
 
-  // Steps that need a display/Electron. Try, and degrade gracefully.
+  // Steps that need a display/Electron. Try, and degrade gracefully — but a
+  // packaging failure on a machine that CAN build must not read as a pass:
+  // that is exactly the false green this script promises not to produce.
+  // Set UPDATES_ALLOW_SKIP=1 to accept a partial run (e.g. headless CI).
   let electronWorks = true;
   let exePath;
   try {
     exePath = packageHarness();
   } catch (e) {
     electronWorks = false;
-    console.log(`\n  [skip] Could not package/run Electron harness here: ${String(e.message).split("\n")[0]}`);
+    const builderOut = `${e.stdout || ""}${e.stderr || ""}`.trim();
+    if (builderOut) {
+      console.log("\n  electron-builder output (tail):\n" + builderOut.split("\n").slice(-15).join("\n"));
+    }
+    const reason = String(e.message).split("\n")[0];
+    if (process.env.UPDATES_ALLOW_SKIP === "1") {
+      console.log(`\n  [skip] Electron harness skipped (UPDATES_ALLOW_SKIP=1): ${reason}`);
+    } else {
+      check("harness packaged so the real Electron update checks can run", false, reason);
+      console.log("  (set UPDATES_ALLOW_SKIP=1 to accept a partial run instead)");
+    }
   }
 
   if (electronWorks) {
@@ -163,7 +176,12 @@ function startFakeFeed(dir, port) {
     console.log("\n  [1/2] Check against real GitHub (Richardnajem/ACCUBOOK)…");
     const realOut = await runHarness(exePath, "real");
     const realLine = (realOut.match(/UPDTEST:result (.*)/) || [])[1] || "";
+    // Both outcomes are correct, depending on whether a release exists yet:
+    //  - releases published  → "available:<version>" (the repo has one, the
+    //    1.0.0 harness is older than it, so the check must offer the update)
+    //  - no releases        → "not-available" or a graceful 404/offline error
     const realOk =
+      realLine.includes("available:") ||
       realLine.includes("not-available") ||
       realLine.includes("No published versions on GitHub") ||
       realLine.includes("HttpError 404") ||
@@ -172,7 +190,7 @@ function startFakeFeed(dir, port) {
     // The full output may also carry the message on a fatal line.
     const realOkFull = realOk || realOut.includes("No published versions on GitHub");
     check(
-      "real GitHub check behaves correctly (no releases → not available / graceful error)",
+      "real GitHub check behaves correctly (available when a release exists, graceful otherwise)",
       realOkFull,
       realOk ? realLine.trim() : "fatal: No published versions on GitHub (expected until first release)"
     );
@@ -217,6 +235,10 @@ function startFakeFeed(dir, port) {
   if (failed) {
     console.log("  ✗ Update flow verification FAILED");
     process.exit(1);
+  }
+  if (!electronWorks) {
+    console.log("  ⚠ Partial run — only the static checks executed, no Electron update check.");
+    process.exit(0);
   }
   console.log("  ✓ Update flow verified — manual check works, nothing auto-downloads.");
   process.exit(0);

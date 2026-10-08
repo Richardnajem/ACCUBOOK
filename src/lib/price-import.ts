@@ -164,7 +164,7 @@ export function parseDateCell2(v: unknown): ParsedDate {
   if (v instanceof Date) return isNaN(v.getTime()) ? {} : { iso: v.toISOString().slice(0, 10) };
   if (typeof v === "number") return v > 20000 && v < 80000 ? { iso: excelSerialToIso(v) } : {};
 
-  let s = String(v).replace(/[\u00a0\u2000-\u200b\uFEFF]/g, " ").trim();
+  const s = String(v).replace(/[\u00a0\u2000-\u200b\uFEFF]/g, " ").trim();
   if (!s) return {};
 
   // ISO-ish: 2026-09-16 / 2026/09/16 / 2026.9.16
