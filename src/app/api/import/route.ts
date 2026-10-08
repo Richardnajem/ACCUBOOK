@@ -326,6 +326,16 @@ export async function PUT(request: NextRequest) {
     const rows: ImportRow[] = Array.isArray(body.rows) ? body.rows : [];
     if (rows.length === 0) return NextResponse.json({ error: "No rows to import" }, { status: 400 });
 
+    // Safety net for bulk writes: snapshot the database before a commit so a
+    // bad import (wrong file, wrong column mapping) is one Restore away from
+    // undone. Best-effort — a failed backup must never block the import.
+    try {
+      const { createBackup } = await import("@/lib/backup");
+      createBackup("pre-import");
+    } catch {
+      // no backup this time; the import continues
+    }
+
     const { upsertTradeByFingerprint } = await import("@/lib/db");
     let inserted = 0;
     let skipped = 0;

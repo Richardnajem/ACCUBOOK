@@ -30,6 +30,12 @@ export default function SettingsPage() {
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [status, setStatus] = useState<UpdateStatus>({ type: "idle" });
 
+  // ── Backups (GET/POST /api/backup) ──────────────────────────
+  const [backups, setBackups] = useState<Array<{ name: string; sizeBytes: number; createdAt: string }>>([]);
+  const [backupFolder, setBackupFolder] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupNote, setBackupNote] = useState<string | null>(null);
+
   useEffect(() => {
     const api = (window as unknown as { electronAPI?: { updates?: ElectronUpdatesAPI } }).electronAPI?.updates;
     if (!api) return; // browser mode: updates don't apply
@@ -59,6 +65,90 @@ export default function SettingsPage() {
     const api = (window as unknown as { electronAPI?: { updates?: ElectronUpdatesAPI } }).electronAPI?.updates;
     api?.install();
   }, []);
+
+  const refreshBackups = useCallback(async () => {
+    try {
+      const res = await fetch("/api/backup", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        backups?: Array<{ name: string; sizeBytes: number; createdAt: string }>;
+        directory?: string;
+      };
+      setBackups(data.backups ?? []);
+      setBackupFolder(data.directory ?? null);
+    } catch {
+      // server unreachable — keep whatever list we already have
+    }
+  }, []);
+
+  // Listed once on mount. The state writes happen in the promise callbacks,
+  // never synchronously in the effect body.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/backup", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { backups?: typeof backups; directory?: string } | null) => {
+        if (cancelled || !data) return;
+        setBackups(data.backups ?? []);
+        setBackupFolder(data.directory ?? null);
+      })
+      .catch(() => {
+        // server unreachable — leave the empty list, the buttons still work
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onBackupNow = useCallback(async () => {
+    setBackupBusy(true);
+    setBackupNote(null);
+    try {
+      const res = await fetch("/api/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create", label: "manual" }),
+      });
+      const data = (await res.json()) as { backup?: { name: string }; error?: string };
+      setBackupNote(res.ok && data.backup ? `Saved ${data.backup.name}` : (data.error ?? "Backup failed"));
+      await refreshBackups();
+    } catch (err) {
+      setBackupNote(err instanceof Error ? err.message : "Backup failed");
+    } finally {
+      setBackupBusy(false);
+    }
+  }, [refreshBackups]);
+
+  const onRestoreBackup = useCallback(
+    async (name: string) => {
+      const ok = window.confirm(
+        `Restore ${name}?\n\nYour current database is snapshotted first, so this itself can be undone.`,
+      );
+      if (!ok) return;
+      setBackupBusy(true);
+      setBackupNote(null);
+      try {
+        const res = await fetch("/api/backup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "restore", name }),
+        });
+        const data = (await res.json()) as { ok?: boolean; error?: string };
+        if (res.ok && data.ok) {
+          setBackupNote(`Restored ${name} — reloading…`);
+          await refreshBackups();
+          setTimeout(() => window.location.reload(), 500);
+        } else {
+          setBackupNote(data.error ?? "Restore failed");
+        }
+      } catch (err) {
+        setBackupNote(err instanceof Error ? err.message : "Restore failed");
+      } finally {
+        setBackupBusy(false);
+      }
+    },
+    [refreshBackups],
+  );
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -103,7 +193,43 @@ export default function SettingsPage() {
 
       {/* ── Data & backups ─────────────────────────────────── */}
       <section className="rounded-xl border border-[var(--card-border)] p-5" style={{ background: "var(--card)" }}>
-        <h3 className="font-semibold">Data &amp; backups</h3>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="font-semibold">Data &amp; backups</h3>
+            <p className="text-xs text-[var(--muted)] mt-1 max-w-md">
+              Backups checkpoint the database first, so a copy never misses rows that are
+              still sitting in the write-ahead log.
+            </p>
+          </div>
+          <button onClick={onBackupNow} disabled={backupBusy} className="btn-secondary disabled:opacity-50">
+            Back up now
+          </button>
+        </div>
+        {backupNote && (
+          <p className="mt-3 text-xs text-[var(--muted)] font-mono break-all">{backupNote}</p>
+        )}
+        {backups.length > 0 && (
+          <ul className="mt-3 space-y-1.5 text-sm">
+            {backups.slice(0, 8).map((b) => (
+              <li key={b.name} className="flex items-center justify-between gap-3">
+                <span className="font-mono text-xs truncate" title={b.name}>
+                  {b.name}
+                  <span className="text-[var(--muted)]"> · {(b.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
+                </span>
+                <button
+                  onClick={() => onRestoreBackup(b.name)}
+                  disabled={backupBusy}
+                  className="btn-secondary disabled:opacity-50 text-xs"
+                >
+                  Restore
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {backupFolder && (
+          <p className="mt-3 text-[11px] text-[var(--muted)] font-mono break-all">Folder: {backupFolder}</p>
+        )}
         <ul className="mt-3 space-y-1.5 text-sm text-[var(--muted)] list-disc list-inside">
           <li>
             Push a snapshot to GitHub anytime: double-click{" "}

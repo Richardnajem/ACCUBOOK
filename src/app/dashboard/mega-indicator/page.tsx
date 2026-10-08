@@ -259,6 +259,9 @@ export default function MegaIndicatorPage() {
   const [preset, setPreset] = useState<Preset>("all"); // "custom" = user moved a slider manually
   const [expandedCat, setExpandedCat] = useState<string | null>(null);
   const [live, setLive] = useState<LiveResponse | null>(null);
+  // When the current payload arrived. Quote staleness is measured against this
+  // instead of Date.now() during render (which is impure — react-hooks/purity).
+  const [liveReceivedAt, setLiveReceivedAt] = useState<number | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [flash, setFlash] = useState<"up" | "down" | null>(null);
   const weightsInitRef = useRef(false);
@@ -541,6 +544,7 @@ export default function MegaIndicatorPage() {
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
         setLive(json);
+        setLiveReceivedAt(Date.now());
         setLiveError(null);
         const p = json?.quote?.price;
         if (typeof p === "number" && prevPriceRef.current !== null && p !== prevPriceRef.current) {
@@ -701,7 +705,10 @@ export default function MegaIndicatorPage() {
   const quoteTimeStr = lastTradeMs
     ? new Date(lastTradeMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : null;
-  const quoteAge = lastTradeMs ? Date.now() - lastTradeMs : null;
+  // Age relative to when THIS payload arrived, not the wall clock at render
+  // time: the poll refreshes both values together, so staleness still trips
+  // when a feed stops moving, without an impure call in render.
+  const quoteAge = lastTradeMs && liveReceivedAt ? liveReceivedAt - lastTradeMs : null;
   const quoteStale = quoteAge != null && quoteAge > 15 * 60_000;
   const sessionNote =
     disp?.session === "pre" ? "Today's pre-market vs yesterday's close"

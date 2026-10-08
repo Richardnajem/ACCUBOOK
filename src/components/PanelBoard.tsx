@@ -73,24 +73,31 @@ export function PanelBoard({ boardKey, ids, className = "grid grid-cols-1 xl:gri
   const [state, setState] = useState<PanelLayoutState>({ order: ids, collapsed: {} });
 
   // Restore saved layout after mount (localStorage is client-only, and
-  // restoring during render would desync SSR hydration).
+  // restoring during render would desync SSR hydration). Both restores run
+  // inside async callbacks: setting state synchronously in an effect body
+  // forces an extra cascading render on every mount — which is exactly what
+  // react-hooks/set-state-in-effect flags.
   useEffect(() => {
     const known = new Set(ids);
-    // 1. Instant: localStorage (last known state on this device)
-    const local = loadLayout(boardKey);
-    if (local) {
-      setState({
-        order: [...local.order.filter((id) => known.has(id)), ...ids.filter((id) => !local.order.includes(id))],
-        collapsed: local.collapsed,
-      });
-    }
+    let cancelled = false;
+    const orderOf = (saved: PanelLayoutState): PanelLayoutState => ({
+      order: [...saved.order.filter((id) => known.has(id)), ...ids.filter((id) => !saved.order.includes(id))],
+      collapsed: saved.collapsed,
+    });
+    // 1. Device layout: applied when the server answer settles (or rejects),
+    //    so the effect body itself never writes state.
+    const applyLocal = () => {
+      if (cancelled) return;
+      const local = loadLayout(boardKey);
+      if (local) setState(orderOf(local));
+    };
     // 2. Authoritative: SQLite via /api/layouts — the same DB is shared by
     // every device pointing at this portfolio.db, so the server layout wins
     // when one exists (e.g. rearranged on another machine).
-    let cancelled = false;
     fetch("/api/layouts", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
+        applyLocal();
         if (cancelled || !d) return;
         const server = d?.layouts?.[boardKey];
         if (!server || !Array.isArray(server.order)) return;
@@ -103,7 +110,7 @@ export function PanelBoard({ boardKey, ids, className = "grid grid-cols-1 xl:gri
           collapsed: server.collapsed ?? prev.collapsed,
         }));
       })
-      .catch(() => { /* offline — local already applied */ });
+      .catch(() => applyLocal()); // offline: the device layout is all there is
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardKey]);

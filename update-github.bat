@@ -40,6 +40,10 @@ REM ---------- 3. ALWAYS backup database BEFORE pushing ----------
 echo [1/5] Backing up database...
 if not exist backups mkdir backups
 if exist portfolio.db (
+    REM Fold the WAL into portfolio.db first: a plain copy would silently miss
+    REM any committed rows still sitting in portfolio.db-wal.
+    node scripts\checkpoint-db.cjs portfolio.db
+    if errorlevel 1 echo     [WARN] WAL checkpoint failed - copying the file as-is.
     for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm-ss"') do set TS=%%i
     copy /y portfolio.db "backups\portfolio_!TS!.db" >nul
     copy /y portfolio.db "backups\latest.db" >nul

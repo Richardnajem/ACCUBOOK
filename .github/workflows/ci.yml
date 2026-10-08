@@ -10,21 +10,37 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # v5 of these actions runs on the supported Node runtime — the Node 20
+      # deprecation warnings came from checkout@v4 / setup-node@v4.
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
 
+      # npm ci installs exactly what package-lock.json pins (npm install can
+      # silently resolve differently than the machine that wrote the lock).
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm ci --legacy-peer-deps
+
+      - name: Lint
+        run: npm run lint
 
       - name: Typecheck
         run: npx tsc --noEmit
 
       - name: Unit tests
         run: npm test
+
+      # Publish config, version comparison and the updater CLI are checked on
+      # every push. The Windows Electron harness can't run on Linux, so the
+      # script reports [skip] and exits 0 — it still fails if the static half
+      # breaks, which is the false-green this guard exists to prevent.
+      - name: Update-flow checks
+        run: npm run test:updates
+        env:
+          UPDATES_ALLOW_SKIP: "1"
 
       - name: Build
         run: npm run build

@@ -8,17 +8,44 @@ export const DB_PATH =
   process.env.ACCUBOOKS_DB_PATH || // legacy env name kept for compatibility
   path.join(process.cwd(), "portfolio.db");
 
-let db: Database.Database;
+let db: Database.Database | undefined;
 
 export function getDb(): Database.Database {
   if (!db) {
     db = new Database(DB_PATH);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
+    // Two processes (the app and, say, a backup script) can touch this file at
+    // once; without a busy timeout the second one errors immediately instead of
+    // waiting for the writer to finish.
+    db.pragma("busy_timeout = 5000");
     initializeDatabase();
     seedDemoPortfolioIfEmpty();
   }
   return db;
+}
+
+// ─── Checkpoint / close ─────────────────────────────────────────
+// WAL keeps committed transactions in a sidecar (`portfolio.db-wal`) until a
+// checkpoint folds them into the main file. Anything that COPIES portfolio.db
+// — a backup, update-github.bat, a drag to a USB stick — must checkpoint first
+// or the copy silently misses the newest rows: the -wal beside this database
+// has run as large as the database itself (4.3 MB next to a 4.6 MB file).
+export function checkpointDatabase(): void {
+  getDb().pragma("wal_checkpoint(TRUNCATE)");
+}
+
+// Releases the file handle so the database can be copied over or replaced
+// (Windows refuses to overwrite an open file). The next getDb() reopens it.
+export function closeDb(): void {
+  if (!db) return;
+  try {
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch {
+    // already unusable — closing below is all that matters
+  }
+  db.close();
+  db = undefined;
 }
 
 // Price-history cache tables. Owned by the schema module (and created on
@@ -46,8 +73,10 @@ export const PRICE_TABLES_SQL = `
   );
 `;
 
-function initializeDatabase() {
-  db.exec(`
+// Base schema. Every migration step may re-run this safely: IF NOT EXISTS
+// makes adopting the migration runner a no-op for databases that already have
+// these tables, and it is what builds a brand-new database.
+const BASE_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       date DATE NOT NULL,
@@ -76,10 +105,43 @@ function initializeDatabase() {
       value TEXT NOT NULL,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-  `);
-  // Same statement market-data.ts runs, so there is exactly one definition
-  // of these tables and both connections see them.
-  db.exec(PRICE_TABLES_SQL);
+`;
+
+// ─── Schema migrations ──────────────────────────────────────────
+// Versioned with PRAGMA user_version: each step runs exactly once, in order,
+// inside a transaction that also bumps the version. Until now the schema was
+// only ever CREATE TABLE IF NOT EXISTS, so the first real column change would
+// have broken every installed copy — this runner is what makes that safe.
+const MIGRATIONS: Array<(d: Database.Database) => void> = [
+  (d) => {
+    d.exec(BASE_SCHEMA_SQL);
+    // Same statement market-data.ts runs, so there is exactly one definition
+    // of these tables and both connections see them.
+    d.exec(PRICE_TABLES_SQL);
+  },
+];
+
+// The highest schema version this build knows how to reach.
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+function initializeDatabase() {
+  const d = db!;
+  const current = Number(d.pragma("user_version", { simple: true }) ?? 0);
+  if (current > SCHEMA_VERSION) {
+    // A newer build wrote this database. Don't guess — keep the data intact and
+    // say what happened: schema changes only ever go forward.
+    console.warn(
+      `[db] portfolio.db is schema v${current}, this build supports v${SCHEMA_VERSION}. ` +
+        `Update the app before using it with this database.`,
+    );
+    return;
+  }
+  for (let v = current; v < MIGRATIONS.length; v++) {
+    d.transaction(() => {
+      MIGRATIONS[v](d);
+      d.pragma(`user_version = ${v + 1}`);
+    })();
+  }
 }
 
 // ─── App settings (key-value; panel layouts, misc prefs) ────────
