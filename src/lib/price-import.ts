@@ -342,6 +342,63 @@ function guessColumnsByData(matrix: unknown[][]): { map: Partial<Record<PriceFie
 }
 
 // ─── Per-sheet parsing ──────────────────────────────────────────
+// Some workbooks label the close column with a stray value instead of a
+// header — your technical-analysis export has "Close/Last" on Sheet1 but a bare
+// number (the latest price) in the same cell on Sheet2/31026/61026. When close
+// can't be matched by name but high/low are known, fall back to the unmapped
+// column whose values actually sit inside the day's high/low range — that is
+// always the close. Ties keep the leftmost column, i.e. the standard
+// Date | Close | Volume | Open | High | Low layout.
+function detectCloseColumn(
+  matrix: unknown[][],
+  headerIdx: number,
+  map: Partial<Record<PriceField, number>>,
+): number {
+  if (map.low === undefined || map.high === undefined) return -1;
+  const loCol = map.low;
+  const hiCol = map.high;
+  const taken = new Set<number>(
+    PRICE_FIELDS.map((f) => map[f]).filter((v): v is number => v !== undefined),
+  );
+  const start = headerIdx >= 0 ? headerIdx + 1 : 0;
+  const end = Math.min(matrix.length, start + 120);
+  if (end - start < 20) return -1;
+  const width = Math.max(0, ...matrix.slice(start, end).map((r) => (r ?? []).length));
+
+  // Reference price scale: the average of the high/low columns. A close always
+  // sits on the same scale as them; volume, RSI, CCI and percent columns do not.
+  let refSum = 0;
+  let refN = 0;
+  for (let r = start; r < end; r++) {
+    const row = matrix[r] as unknown[] | undefined;
+    for (const c of [loCol, hiCol]) {
+      const v = parseNum(row?.[c]);
+      if (v != null && v > 0) { refSum += v; refN++; }
+    }
+  }
+  const ref = refN > 0 ? refSum / refN : 0;
+  if (!(ref > 0)) return -1;
+
+  // First (leftmost) numeric column on that price scale wins — the standard
+  // layouts put Close immediately after Date, and ties must stay deterministic.
+  for (let c = 0; c < width; c++) {
+    if (taken.has(c)) continue;
+    let nums = 0;
+    let sum = 0;
+    let tested = 0;
+    for (let r = start; r < end; r++) {
+      const v = parseNum(matrix[r]?.[c]);
+      tested++;
+      if (v != null) { nums++; sum += v; }
+    }
+    if (tested < 20 || nums / tested < 0.7) continue;
+    const mean = sum / nums;
+    if (mean <= 0 || Math.abs(mean - ref) / ref > 0.25) continue;
+    return c;
+  }
+  return -1;
+}
+
 interface SheetParse {
   rows: PriceRow[];
   summary: SheetSummary | null;
@@ -369,6 +426,16 @@ function parseSheet(
   }
 
   const hasOhlc = map.open !== undefined || map.high !== undefined || map.low !== undefined;
+  // Close missing by name? Recover it from the data before giving up on the sheet.
+  if (map.close === undefined && !fallback) {
+    const guess = detectCloseColumn(matrix, headerIdx, map);
+    if (guess >= 0) {
+      map.close = guess;
+      warnings.push(
+        `Sheet "${sheetName}": no "Close" header found — column ${guess + 1} was used (its values sit inside the high/low range).`,
+      );
+    }
+  }
   if (map.date === undefined || (map.close === undefined && !hasOhlc)) {
     return { rows: [], summary: null }; // not a price sheet
   }
