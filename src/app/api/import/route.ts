@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
-// pdf-parse v2 exposes a PDFParse class (CJS build).
-import { PDFParse } from "pdf-parse";
 
 export const runtime = "nodejs";
 
@@ -222,6 +220,9 @@ export async function POST(request: NextRequest) {
     let rows: ImportRow[] = [];
 
     if (name.endsWith(".pdf")) {
+      // Imported here rather than at module scope: pdf-parse brings a native
+      // canvas addon with it, and only this branch ever needs it.
+      const { PDFParse } = await import("pdf-parse");
       const parser = new PDFParse({ data: new Uint8Array(buf) });
       try {
         const result = await parser.getText();
