@@ -12,6 +12,13 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Not app source: leftover probe/experiment trees and build + harness
+    // output. Linting them drags in vendored packages (and OOMs eslint).
+    ".tmp-symlink-probe/**",
+    ".smoke/**",
+    "backups/**",
+    "release/**",
+    "tests/electron/update-sim/**",
   ]),
 ]);
 
