@@ -16,7 +16,10 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # Node 22: better-sqlite3's bundled linux prebuild segfaults when a
+          # database is opened on Node 20 (reproduced on WSL + this runner);
+          # the dev machine runs Node 22.
+          node-version: 22
           cache: npm
 
       # npm ci installs exactly what package-lock.json pins (npm install can
