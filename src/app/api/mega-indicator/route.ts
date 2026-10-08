@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDailyBars } from "@/lib/market-data";
-import { sma, ema, rsi, macd, bollinger, atr, rollingMax } from "@/lib/ta";
+import { sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev } from "@/lib/ta";
 import { MA_PERIODS, computeMegaIndicator, WeightMap } from "@/lib/mega-indicator";
+import { evaluateCustom, sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,10 +14,17 @@ interface TechnicalRaw {
   dataSource: "cache" | "yahoo" | "none";
   ticker: string | null;
   error: string | null;
+  /** Spec objects for user-defined indicators that evaluated successfully. */
+  customSpecs: ReturnType<typeof evaluateCustom>["specs"];
+  /** Readable failures from built-in data loading or custom formulas. */
+  warnings: string[];
 }
 
-async function technicalRaw(ticker: string | null): Promise<TechnicalRaw> {
-  const empty: TechnicalRaw = { values: {}, asOf: null, dataSource: "none", ticker: null, error: null };
+async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[]): Promise<TechnicalRaw> {
+  const empty: TechnicalRaw = {
+    values: {}, asOf: null, dataSource: "none", ticker: null, error: null,
+    customSpecs: [], warnings: [],
+  };
   if (!ticker) return empty;
   try {
     const { bars, meta, source } = await getDailyBars(ticker.trim().toUpperCase(), 3);
@@ -56,6 +64,19 @@ async function technicalRaw(ticker: string | null): Promise<TechnicalRaw> {
     // 5. ATR% (14)
     const a = atr(high, low, close, 14);
     const atrPct = Number.isFinite(a[last]) ? (a[last] / px) * 100 : NaN;
+
+    // 5b. Stochastic (14, 3, 3) — slow %K and %D, both 0-100
+    const st = stochastic(high, low, close, 14, 3, 3);
+    const stochK = Number.isFinite(st.k[last]) ? st.k[last] : NaN;
+    const stochD = Number.isFinite(st.d[last]) ? st.d[last] : NaN;
+
+    // 5c. Commodity Channel Index (20)
+    const cci20 = cci(high, low, close, 20);
+    const cciVal = Number.isFinite(cci20[last]) ? cci20[last] : NaN;
+
+    // 5d. 3-day volatility: sample stdev of closes as % of price
+    const sd3 = stdev(close, 3);
+    const vol3d = Number.isFinite(sd3[last]) && px !== 0 ? (sd3[last] / px) * 100 : NaN;
 
     // 6. 3-month (~63 trading days) momentum
     const lb = Math.min(63, close.length - 1);
@@ -130,6 +151,13 @@ async function technicalRaw(ticker: string | null): Promise<TechnicalRaw> {
       maValues[`ta-ema-${p}`] = Number.isFinite(e[last]) ? ((px - e[last]) / e[last]) * 100 : NaN;
     }
 
+    // User-defined indicators — evaluated once against the same bars.
+    const customRes = custom.length
+      ? evaluateCustom(custom, {
+          open: bars.map((b) => b.open), high, low, close, volume,
+        })
+      : null;
+
     return {
       values: {
         "ta-trend-50-200": trend,
@@ -137,6 +165,10 @@ async function technicalRaw(ticker: string | null): Promise<TechnicalRaw> {
         "ta-macd-hist": macdHist,
         "ta-bb-pos": bbPos,
         "ta-atr-pct": atrPct,
+        "ta-stoch-k": stochK,
+        "ta-stoch-d": stochD,
+        "ta-cci-20": cciVal,
+        "ta-vol-3d": vol3d,
         "ta-mom-63": mom,
         "ta-vol-ratio": volRatio,
         "ta-dist-52w-high": dist52,
@@ -144,11 +176,14 @@ async function technicalRaw(ticker: string | null): Promise<TechnicalRaw> {
         "ta-kernel-slope": slope,
         "ta-kernel-residual": residualPct,
         ...maValues,
+        ...(customRes?.values ?? {}),
       },
       asOf: bars[last].date,
       dataSource: source,
       ticker: meta.symbol,
       error: null,
+      customSpecs: customRes?.specs ?? [],
+      warnings: customRes?.errors ?? [],
     };
   } catch (e) {
     return { ...empty, ticker, error: e instanceof Error ? e.message : "Failed to load market data." };
@@ -183,10 +218,34 @@ export async function GET(request: NextRequest) {
       } catch { /* ignore malformed excluded */ }
     }
 
-    const technical = await technicalRaw(ticker);
+    // User-defined indicators (from the "Add Indicator" editor).
+    let custom: CustomIndicatorDef[] = [];
+    let customParseError: string | null = null;
+    const customParam = searchParams.get("custom");
+    if (customParam) {
+      try {
+        const rawCustom: unknown = JSON.parse(customParam);
+        if (Array.isArray(rawCustom)) {
+          custom = sanitizeCustomList(rawCustom);
+          // Definitions the sanitizer dropped would otherwise vanish silently —
+          // tell the user which of their saved indicators did not load.
+          const skipped = rawCustom.length - custom.length;
+          if (skipped > 0) {
+            customParseError =
+              `${skipped} of your saved indicators could not be loaded — ` +
+              `the formula is no longer valid, or its id is broken.`;
+          }
+        }
+      } catch {
+        customParseError = "Your saved indicator list was malformed and was ignored.";
+      }
+    }
+
+    const technical = await technicalRaw(ticker, custom);
 
     const result = computeMegaIndicator({
       technical: technical.values,
+      custom: technical.customSpecs,
       weights,
       excluded,
       meta: {
@@ -196,7 +255,12 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({ ...result, technicalError: technical.error });
+    return NextResponse.json({
+      ...result,
+      technicalError: technical.error,
+      warnings: customParseError ? [customParseError, ...technical.warnings] : technical.warnings,
+      customCount: technical.customSpecs.length,
+    });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "Failed to compute mega indicator." },

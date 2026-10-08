@@ -14,6 +14,7 @@ import { getDailyBars } from "./market-data";
 import { getDb } from "./db";
 import { CAUSAL_SPECS, computeMegaScoreSeries } from "./mega-score";
 import type { WeightMap } from "./mega-indicator";
+import { type CustomIndicatorDef } from "./custom-indicators";
 
 export interface HistoryPoint {
   date: string;
@@ -55,16 +56,32 @@ function hashWeights(weights?: WeightMap): string {
   return (h >>> 0).toString(36);
 }
 
+// Hash the user-defined indicators so editing one invalidates the cache.
+function hashCustom(custom?: CustomIndicatorDef[]): string {
+  if (!custom?.length) return "0";
+  const str = custom.map((c) => `${c.id}:${c.formula}:${c.direction}:${c.thresholds.join(",")}`).join("|");
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 export async function getMegaHistory(
   symbol: string,
   weights?: WeightMap,
   years = 3,
+  custom?: CustomIndicatorDef[],
 ): Promise<MegaHistoryResult> {
   const sym = symbol.trim().toUpperCase();
   // Sub-year windows (1M ≈ 0.08y, 6M = 0.5y) must be part of the cache key,
   // otherwise the 1M chart would be served the cached 3Y series trimmed client-side.
-  const wHash = `${hashWeights(weights)}:${years}`;
+  const wHash = `${hashWeights(weights)}:${years}:${hashCustom(custom)}`;
   const warnings: string[] = [];
+  // Names for the legend: built-ins + any custom indicators that compute.
+  const nameMap = (): Record<string, string> => {
+    const m: Record<string, string> = Object.fromEntries(CAUSAL_SPECS.map((s) => [s.id, s.name]));
+    for (const c of custom ?? []) m[c.id] = c.name;
+    return m;
+  };
 
   // ─── Cache lookup ───────────────────────────────────────────
   const db = getDb();
@@ -99,7 +116,7 @@ export async function getMegaHistory(
           from: parsed.points[0].date,
           to: parsed.to,
           points: parsed.points,
-          indicatorNames: Object.fromEntries(CAUSAL_SPECS.map((s) => [s.id, s.name])),
+          indicatorNames: nameMap(),
           cached: true,
           warnings,
         };
@@ -113,19 +130,23 @@ export async function getMegaHistory(
     warnings.push(`Only ${bars.length} bars available — 200-day indicators need more history, early scores will be partial (neutral 50).`);
   }
 
-  const { score, indicators } = computeMegaScoreSeries(
+  const { score, indicators, customSpecs, customErrors } = computeMegaScoreSeries(
     {
       high: bars.map((b) => b.high),
       low: bars.map((b) => b.low),
       close: bars.map((b) => b.close),
       volume: bars.map((b) => b.volume),
+      open: bars.map((b) => b.open),
     },
-    weights
+    weights,
+    custom
   );
+  warnings.push(...customErrors);
+  const scoredSpecs = [...CAUSAL_SPECS, ...customSpecs];
 
   const points: HistoryPoint[] = bars.map((bar, i) => {
     const indScores: Record<string, number> = {};
-    for (const spec of CAUSAL_SPECS) {
+    for (const spec of scoredSpecs) {
       const v = indicators[spec.id]?.[i];
       if (v !== undefined && Number.isFinite(v)) indScores[spec.id] = Math.round(v * 10) / 10;
     }
@@ -138,12 +159,15 @@ export async function getMegaHistory(
     };
   });
 
+  const indicatorNames: Record<string, string> = nameMap();
+  for (const s of customSpecs) indicatorNames[s.id] = s.name;
+
   const result: MegaHistoryResult = {
     symbol: sym,
     from: points[0]?.date ?? lastDate ?? "",
     to: lastDate ?? "",
     points,
-    indicatorNames: Object.fromEntries(CAUSAL_SPECS.map((s) => [s.id, s.name])),
+    indicatorNames,
     cached: false,
     warnings,
   };

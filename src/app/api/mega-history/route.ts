@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMegaHistory } from "@/lib/mega-history";
 import type { WeightMap } from "@/lib/mega-indicator";
+import { sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +32,16 @@ export async function GET(request: NextRequest) {
       } catch { /* ignore malformed weights */ }
     }
 
-    const result = await getMegaHistory(ticker, weights, years);
+    let custom: CustomIndicatorDef[] = [];
+    const customParam = searchParams.get("custom");
+    if (customParam) {
+      try {
+        const rawCustom: unknown = JSON.parse(customParam);
+        if (Array.isArray(rawCustom)) custom = sanitizeCustomList(rawCustom);
+      } catch { /* ignore malformed custom defs */ }
+    }
+
+    const result = await getMegaHistory(ticker, weights, years, custom);
     return NextResponse.json(result);
   } catch (e) {
     return NextResponse.json(

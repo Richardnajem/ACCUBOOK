@@ -1,6 +1,6 @@
 {
   "name": "stockfolio",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "description": "Stockfolio — local-first portfolio manager by Richard Najem",
   "author": "Richard Najem <richard2.najem@gmail.com>",
@@ -17,7 +17,8 @@
     "test:updates": "node scripts/test-updates.js",
     "electron": "electron .",
     "pack": "npm run build && node scripts/depsymlinks.cjs && electron-builder --dir",
-    "dist": "npm run build && node scripts/depsymlinks.cjs && electron-builder"
+    "dist": "npm run build && node scripts/depsymlinks.cjs && electron-builder",
+    "release": "npm run build && node scripts/depsymlinks.cjs && electron-builder --publish always"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -97,7 +98,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "public/icon.ico"
+      "installerIcon": "public/icon.ico",
+      "artifactName": "${productName}-${version}-Setup.${ext}"
     },
     "portable": {
       "artifactName": "Stockfolio-Portable-${version}.exe"

@@ -80,7 +80,11 @@ export function sanitizeOverrides(raw: unknown): ScoreOverrideMap {
     const override: ScoreOverride = {};
     if (isDirection(rec.direction)) override.direction = rec.direction;
     if (isFinitePair(rec.thresholds)) {
-      override.thresholds = [Number(rec.thresholds[0]), Number(rec.thresholds[1])];
+      const lo = Number(rec.thresholds[0]);
+      const hi = Number(rec.thresholds[1]);
+      // Not reversed — a descending pair would let normalizeScore() return
+      // scores above 100. Equal is fine: it's a step function (e.g. [0, 0]).
+      if (lo <= hi) override.thresholds = [lo, hi];
     }
     if (Object.keys(override).length > 0) out[id] = override;
   }

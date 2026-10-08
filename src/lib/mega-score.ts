@@ -12,7 +12,8 @@
 // exclusively data up to D, so it is safe to trade on bar-by-bar.
 
 import { ALL_SPECS, MA_PERIODS, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
-import { sma, ema, rsi, macd, bollinger, atr, rollingMax } from "./ta";
+import { sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev } from "./ta";
+import { evaluateCustomSeries, type CustomIndicatorDef } from "./custom-indicators";
 
 /** Minimal OHLCV shape needed (Bar satisfies it; strategies pass zipped arrays). */
 export interface MegaScoreInput {
@@ -20,6 +21,8 @@ export interface MegaScoreInput {
   low: number[];
   close: number[];
   volume: number[];
+  /** Optional — required only when evaluating custom formulas that use `open`. */
+  open?: number[];
 }
 
 /** Specs computable causally at every bar (kernel indicators excluded). */
@@ -32,6 +35,10 @@ export interface MegaScoreSeries {
   score: number[];
   /** Per-indicator 0-100 score series keyed by spec id (NaN during warm-up). */
   indicators: Record<string, number[]>;
+  /** Specs of the custom definitions that evaluated successfully. */
+  customSpecs: IndicatorSpec[];
+  /** Readable failures from custom definitions (empty when none were passed). */
+  customErrors: string[];
 }
 
 /**
@@ -40,10 +47,28 @@ export interface MegaScoreSeries {
  */
 export function computeMegaScoreSeries(
   input: MegaScoreInput,
-  weights?: WeightMap
+  weights?: WeightMap,
+  custom?: CustomIndicatorDef[]
 ): MegaScoreSeries {
   const { high, low, close, volume } = input;
   const n = close.length;
+
+  // ─── User-defined indicators (evaluated over the same bars) ──
+  let customSpecs: IndicatorSpec[] = [];
+  let customErrors: string[] = [];
+  const customRaw: Record<string, number[]> = {};
+  if (custom?.length) {
+    if (input.open && input.open.length === n) {
+      const res = evaluateCustomSeries(custom, {
+        open: input.open, high, low, close, volume,
+      });
+      customSpecs = res.specs;
+      customErrors = res.errors;
+      Object.assign(customRaw, res.series);
+    } else {
+      customErrors = ["Open prices are unavailable for this data set — custom indicators were skipped."];
+    }
+  }
 
   // Raw indicator values, aligned with the bars (NaN during warm-up).
   const raw: Record<string, number[]> = {};
@@ -57,6 +82,9 @@ export function computeMegaScoreSeries(
   const atr14 = atr(high, low, close, 14);
   const volAvg = sma(volume, 20);
   const hi52 = rollingMax(close, 252);
+  const stoch14 = stochastic(high, low, close, 14, 3, 3);
+  const cci20 = cci(high, low, close, 20);
+  const vol3d = stdev(close, 3);
 
   for (let i = 0; i < n; i++) {
     const px = close[i];
@@ -79,6 +107,16 @@ export function computeMegaScoreSeries(
     }
 
     if (Number.isFinite(atr14[i])) put("ta-atr-pct")[i] = (atr14[i] / px) * 100;
+
+    // Stochastic (14,3,3) — slow %K and %D, 0-100
+    if (Number.isFinite(stoch14.k[i])) put("ta-stoch-k")[i] = stoch14.k[i];
+    if (Number.isFinite(stoch14.d[i])) put("ta-stoch-d")[i] = stoch14.d[i];
+
+    // Commodity Channel Index (20)
+    if (Number.isFinite(cci20[i])) put("ta-cci-20")[i] = cci20[i];
+
+    // 3-day volatility: sample stdev of closes, as % of price
+    if (Number.isFinite(vol3d[i]) && px !== 0) put("ta-vol-3d")[i] = (vol3d[i] / px) * 100;
 
     // ~3-month momentum
     if (i >= 63) put("ta-mom-63")[i] = (px / close[i - 63] - 1) * 100;
@@ -110,9 +148,10 @@ export function computeMegaScoreSeries(
   }
 
   // ─── Normalize + blend into the composite ─────────────────────
+  const specsToScore: IndicatorSpec[] = [...CAUSAL_SPECS, ...customSpecs];
   const indicators: Record<string, number[]> = {};
-  for (const spec of CAUSAL_SPECS) {
-    const vals = raw[spec.id];
+  for (const spec of specsToScore) {
+    const vals = spec.id in customRaw ? customRaw[spec.id] : raw[spec.id];
     if (!vals) continue;
     const scores = new Array(n).fill(NaN);
     for (let i = 0; i < n; i++) {
@@ -125,7 +164,7 @@ export function computeMegaScoreSeries(
   for (let i = 0; i < n; i++) {
     let wSum = 0;
     let wVal = 0;
-    for (const spec of CAUSAL_SPECS) {
+    for (const spec of specsToScore) {
       const s = indicators[spec.id]?.[i];
       if (s === undefined || !Number.isFinite(s)) continue;
       const w = Math.max(0, weights?.[spec.id] ?? 1);
@@ -136,5 +175,5 @@ export function computeMegaScoreSeries(
     score[i] = wSum > 0 ? Math.round((wVal / wSum) * 10) / 10 : 50;
   }
 
-  return { score, indicators };
+  return { score, indicators, customSpecs, customErrors };
 }

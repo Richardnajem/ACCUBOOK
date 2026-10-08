@@ -18,6 +18,18 @@ import {
   formulaLabel,
   type ScoreOverrideMap,
 } from "@/lib/mega-overrides";
+import {
+  FUNCS,
+  MAX_CUSTOM,
+  MAX_FORMULA_LEN,
+  MAX_NAME_LEN,
+  VARS,
+  loadCustom,
+  newCustomId,
+  parseFormula,
+  saveCustom,
+  type CustomIndicatorDef,
+} from "@/lib/custom-indicators";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 
 interface MegaIndicator {
@@ -32,6 +44,8 @@ interface MegaIndicator {
   direction: "higher" | "lower" | "band";
   thresholds: [number, number];
   description: string;
+  /** Exact calculation, shown in the right-click inspector. */
+  formula: string;
 }
 
 interface MegaCategory { category: string; score: number; weightShare: number; }
@@ -50,6 +64,10 @@ interface MegaResponse {
     technicalCount: number;
   };
   technicalError: string | null;
+  /** Per-definition failures from user-defined indicators. */
+  warnings?: string[];
+  /** How many user-defined indicators evaluated successfully. */
+  customCount?: number;
   error?: string;
 }
 
@@ -185,6 +203,7 @@ const pct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.
 const categoryIcons: Record<string, string> = {
   Technical: "📉",
   "Moving Averages": "📈",
+  Custom: "🧩",
 };
 
 type Preset = "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
@@ -250,6 +269,17 @@ export default function MegaIndicatorPage() {
   const [overrides, setOverrides] = useState<ScoreOverrideMap>(() => loadOverrides());
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
 
+  // ─── User-defined indicators ("Add Indicator" editor) ─────────
+  // Definitions live in localStorage and are sent to the API, which compiles
+  // and evaluates them against the same bar history as the built-ins.
+  const [custom, setCustom] = useState<CustomIndicatorDef[]>(() => loadCustom());
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [draft, setDraft] = useState<CustomIndicatorDef | null>(null);
+  const [draftErr, setDraftErr] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ key: string; value: number; score: number } | null>(null);
+  const [previewErr, setPreviewErr] = useState<{ key: string; message: string } | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
+
   // ─── Score-over-time history ───────────────────────────────────
   const [history, setHistory] = useState<MegaHistoryResponse | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -281,6 +311,7 @@ export default function MegaIndicatorPage() {
       try {
         const params = new URLSearchParams();
         if (ticker) params.set("ticker", ticker);
+        if (custom.length) params.set("custom", JSON.stringify(custom));
         const res = await fetch(`/api/mega-indicator?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
@@ -305,9 +336,9 @@ export default function MegaIndicatorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [ticker]);
+  }, [ticker, custom]);
 
-  // Persist weights / preset / ticker on every change
+  // Persist weights / preset / ticker on every change.
   useEffect(() => {
     if (!weightsInitRef.current) return; // don't save the empty initial state
     try {
@@ -319,6 +350,8 @@ export default function MegaIndicatorPage() {
 
   // Persist per-indicator formula overrides on every change.
   useEffect(() => { saveOverrides(overrides); }, [overrides]);
+  // Persist user-defined indicators on every change.
+  useEffect(() => { saveCustom(custom); }, [custom]);
   // Escape closes the right-click formula editor.
   useEffect(() => {
     if (!menu) return;
@@ -327,15 +360,148 @@ export default function MegaIndicatorPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [menu]);
 
+  // ─── User-defined indicator editor ────────────────────────────
+  const openIndicatorEditor = (def: CustomIndicatorDef) => {
+    setDraft({ ...def });
+    setDraftErr(null);
+    setPreview(null);
+    setPreviewErr(null);
+    setEditorOpen(true);
+  };
+
+  const startNewIndicator = () => {
+    // The cap is enforced on save (where the error is actually visible).
+    openIndicatorEditor({
+      id: newCustomId(),
+      name: "",
+      formula: "",
+      direction: "higher",
+      thresholds: [0, 1],
+      unit: "",
+      description: "",
+    });
+  };
+
+  const closeEditor = () => {
+    setEditorOpen(false);
+    setDraft(null);
+    setDraftErr(null);
+    setPreview(null);
+    setPreviewErr(null);
+  };
+
+  const saveDraft = () => {
+    if (!draft) return;
+    const name = draft.name.trim();
+    if (!name) { setDraftErr("Give the indicator a name."); return; }
+    const parsed = parseFormula(draft.formula);
+    if (!parsed.ok) { setDraftErr(parsed.error); return; }
+    const [lo, hi] = draft.thresholds;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo >= hi) {
+      setDraftErr("Thresholds must be two numbers in ascending order.");
+      return;
+    }
+    const exists = custom.some((c) => c.id === draft.id);
+    if (!exists && custom.length >= MAX_CUSTOM) {
+      setDraftErr(`You can define up to ${MAX_CUSTOM} indicators — remove one first.`);
+      return;
+    }
+    const def: CustomIndicatorDef = { ...draft, name, thresholds: [lo, hi] };
+    setCustom((prev) => (exists ? prev.map((c) => (c.id === def.id ? def : c)) : [...prev, def]));
+    closeEditor();
+  };
+
+  const removeCustomIndicator = (id: string) => {
+    setCustom((prev) => prev.filter((c) => c.id !== id));
+    setWeights((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    setOverrides((m) => clearFormulaOverride(m, id));
+    if (overlayId === id) setOverlayId("");
+  };
+
+  useEffect(() => {
+    if (!editorOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeEditor(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editorOpen]);
+
+  // Validation is pure, so it runs during render — the effect below therefore
+  // never has to setState just to report a parse error.
+  const draftState = useMemo(() => {
+    if (!editorOpen || !draft || !draft.formula.trim()) return { kind: "empty" as const };
+    const parsed = parseFormula(draft.formula);
+    if (!parsed.ok) return { kind: "invalid" as const, message: parsed.error };
+    const [lo, hi] = draft.thresholds;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo >= hi) {
+      return { kind: "invalid" as const, message: "Thresholds must be two numbers in ascending order." };
+    }
+    return { kind: "ready" as const };
+  }, [editorOpen, draft]);
+
+  // Identifies which draft a fetched preview belongs to, so results that come
+  // back after the user has moved on are simply ignored instead of cleared.
+  const previewKey =
+    draftState.kind === "ready" && draft
+      ? JSON.stringify([draft.id, draft.name.trim(), draft.formula, draft.direction, draft.thresholds])
+      : "";
+
+  // Only show a preview/error that belongs to the draft as it stands right now.
+  const livePreview = preview && preview.key === previewKey ? preview : null;
+  const previewMessage =
+    draftState.kind === "invalid"
+      ? draftState.message
+      : previewErr && previewErr.key === previewKey
+        ? previewErr.message
+        : null;
+
+  // Live preview: compile the draft against the real bar history (debounced),
+  // so the raw value and score are verified before anything is saved.
+  useEffect(() => {
+    if (draftState.kind !== "ready" || !draft) return;
+    const key = previewKey;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ ticker });
+        params.set("custom", JSON.stringify([{ ...draft, name: draft.name.trim() || "Preview" }]));
+        const res = await fetch(`/api/mega-indicator?${params.toString()}`, { cache: "no-store" });
+        const json = await res.json();
+        if (cancelled) return;
+        if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
+        const ind = (json.indicators || []).find((i: { id: string }) => i.id === draft.id);
+        if (ind) {
+          setPreview({ key, value: ind.value as number, score: ind.score as number });
+          setPreviewErr(null);
+        } else {
+          setPreviewErr({
+            key,
+            message:
+              (Array.isArray(json.warnings) && json.warnings[0]) ||
+              "The formula produced no value for this ticker — check the lookback period.",
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setPreviewErr({ key, message: e instanceof Error ? e.message : "Preview failed." });
+        }
+      }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [draftState.kind, draft, previewKey, ticker]);
+
   // Fetch score history when ticker or horizon changes (weights intentionally
   // NOT a dependency — even-weight history is cached and instant; refetching on
-  // every slider move would be slow and noisy).
+  // every slider move would be slow and noisy). User-defined indicators ARE a
+  // dependency: they change which series the history contains, and the server
+  // caches the result keyed by their definitions.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setHistoryLoading(true);
       try {
-        const res = await fetch(`/api/mega-history?ticker=${encodeURIComponent(ticker)}&years=${historyYears}`, { cache: "no-store" });
+        const params = new URLSearchParams({ ticker, years: String(historyYears) });
+        if (custom.length) params.set("custom", JSON.stringify(custom));
+        const res = await fetch(`/api/mega-history?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
@@ -347,7 +513,7 @@ export default function MegaIndicatorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [ticker, historyYears]);
+  }, [ticker, historyYears, custom]);
 
   const historyData = useMemo(() => {
     if (!history?.points?.length) return [];
@@ -805,6 +971,13 @@ export default function MegaIndicatorPage() {
                 {view?.technicalError && (
                   <p className="mt-3 text-xs text-amber-500 dark:text-amber-400">⚠ {view.technicalError}</p>
                 )}
+                {view?.warnings && view.warnings.length > 0 && (
+                  <div className="mt-3 space-y-1">
+                    {view.warnings.map((w, i) => (
+                      <p key={i} className="text-xs text-amber-500 dark:text-amber-400">⚠ {w}</p>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Category radar */}
@@ -924,7 +1097,14 @@ export default function MegaIndicatorPage() {
             id="weights"
             title="Indicator Weights"
             right={
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  onClick={startNewIndicator}
+                  title="Define your own indicator from a formula over OHLCV"
+                  className="text-xs px-2.5 py-1.5 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 font-medium"
+                >
+                  ＋ Add Indicator
+                </button>
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -988,7 +1168,7 @@ export default function MegaIndicatorPage() {
                                   <div className="flex items-center gap-2">
                                     <span className="text-sm font-medium truncate">{ind.name}</span>
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-hover)] text-[var(--muted)]">
-                                      {ind.category === "Moving Averages" ? "MA" : "TA"}
+                                      {ind.category === "Custom" ? "MY" : ind.category === "Moving Averages" ? "MA" : "TA"}
                                     </span>
                                   </div>
                                   <p className="text-[11px] text-[var(--muted)] truncate">
@@ -1030,6 +1210,22 @@ export default function MegaIndicatorPage() {
                                 </span>
                                 {isFormulaChanged({ direction: ind.direction, thresholds: ind.thresholds }, overrides[ind.id]) && (
                                   <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300">custom</span>
+                                )}
+                                {ind.category === "Custom" && custom.find((c) => c.id === ind.id) && (
+                                  <span className="flex items-center gap-1.5 ml-auto">
+                                    <button
+                                      onClick={() => openIndicatorEditor(custom.find((c) => c.id === ind.id)!)}
+                                      className="px-1.5 py-0.5 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+                                    >
+                                      Edit formula
+                                    </button>
+                                    <button
+                                      onClick={() => removeCustomIndicator(ind.id)}
+                                      className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-400 hover:bg-red-500/10"
+                                    >
+                                      Remove
+                                    </button>
+                                  </span>
                                 )}
                               </p>
                             </div>
@@ -1078,6 +1274,201 @@ export default function MegaIndicatorPage() {
         </PanelBoard>
       )}
 
+      {/* ─── Add / edit a user-defined indicator ────────────────── */}
+      {editorOpen && draft && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+          onClick={closeEditor}
+          onContextMenu={(e) => { e.preventDefault(); closeEditor(); }}
+        >
+          <div
+            className="w-full max-w-2xl rounded-2xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-5 space-y-4 my-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold">{custom.some((c) => c.id === draft.id) ? "Edit Indicator" : "Add Indicator"}</h3>
+                <p className="text-xs text-[var(--muted)]">
+                  Your formula is compiled and evaluated on the same daily bars as the built-ins.
+                </p>
+              </div>
+              <button onClick={closeEditor} className="text-[var(--muted)] hover:text-[var(--foreground)]" aria-label="Close">✕</button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <label className="sm:col-span-2 block">
+                <span className="text-xs text-[var(--muted)]">Name</span>
+                <input
+                  value={draft.name}
+                  maxLength={MAX_NAME_LEN}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  placeholder="e.g. Price vs 200-day EMA"
+                  className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-[var(--muted)]">Unit</span>
+                <input
+                  value={draft.unit}
+                  maxLength={8}
+                  onChange={(e) => setDraft({ ...draft, unit: e.target.value })}
+                  placeholder="%, x, $ …"
+                  className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <label className="block">
+              <span className="text-xs text-[var(--muted)]">
+                Formula — evaluated bar by bar, the latest value is scored
+              </span>
+              <textarea
+                rows={3}
+                value={draft.formula}
+                maxLength={MAX_FORMULA_LEN}
+                spellCheck={false}
+                onChange={(e) => setDraft({ ...draft, formula: e.target.value })}
+                placeholder="(close - sma(close, 20)) / sma(close, 20) * 100"
+                className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+              />
+            </label>
+
+            <div className="flex items-start justify-between gap-3 text-xs min-h-[1.25rem]">
+              {livePreview ? (
+                <span className="text-emerald-500 dark:text-emerald-400">
+                  ✓ <b>{draft.name.trim() || "Preview"}</b>{" "}
+                  <b className="tabular-nums">{livePreview.value.toLocaleString(undefined, { maximumFractionDigits: 4 })}</b>
+                  {draft.unit && draft.unit !== "$" ? ` ${draft.unit}` : ""}
+                  {" → score "}
+                  <b className="tabular-nums" style={{ color: scoreColor(livePreview.score) }}>{livePreview.score.toFixed(1)}</b>
+                </span>
+              ) : previewMessage ? (
+                <span className="text-red-500 dark:text-red-400">⚠ {previewMessage}</span>
+              ) : draftState.kind === "ready" ? (
+                <span className="text-[var(--muted)]">Checking against {ticker}…</span>
+              ) : (
+                <span className="text-[var(--muted)]">Type a formula to preview it against {ticker}…</span>
+              )}
+              <button
+                onClick={() => setShowHelp((v) => !v)}
+                className="shrink-0 text-[var(--muted)] hover:text-[var(--foreground)] underline decoration-dotted"
+              >
+                {showHelp ? "Hide" : "Functions"}
+              </button>
+            </div>
+
+            {showHelp && (
+              <div className="rounded-lg border border-[var(--card-border)] bg-[var(--card-hover)] p-3 text-[11px] space-y-2 max-h-52 overflow-y-auto">
+                <p className="text-[var(--muted)]"><b>Variables</b></p>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(VARS).map(([k, v]) => (
+                    <button
+                      key={k}
+                      onClick={() => setDraft({ ...draft, formula: `${draft.formula}${draft.formula ? " " : ""}${k}` })}
+                      className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 font-mono hover:bg-indigo-500/25"
+                      title={v}
+                    >
+                      {k}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[var(--muted)] pt-1"><b>Functions</b> — click to insert</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(FUNCS).map(([k, f]) => (
+                    <button
+                      key={k}
+                      onClick={() => setDraft({ ...draft, formula: `${draft.formula}${draft.formula ? " " : ""}${k}(` })}
+                      className="px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--card-border)] font-mono hover:border-indigo-500/50"
+                      title={f.help}
+                    >
+                      {k}()
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[var(--muted)] pt-1">
+                  Operators: <b>+ − * / % ^</b> and comparisons <b>&gt; &lt; &gt;= &lt;= == !=</b> (1/0).
+                  Lookback periods must be whole numbers.
+                </p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <label className="block">
+                <span className="text-xs text-[var(--muted)]">What scores better</span>
+                <select
+                  value={draft.direction}
+                  onChange={(e) => setDraft({ ...draft, direction: e.target.value as CustomIndicatorDef["direction"] })}
+                  className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                >
+                  <option value="higher">Higher is better</option>
+                  <option value="lower">Lower is better</option>
+                  <option value="band">Healthy band (peak in the middle)</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs text-[var(--muted)]">
+                  {draft.direction === "higher" ? "Bad (→0)" : draft.direction === "lower" ? "Good (→100)" : "Band low"}
+                </span>
+                <input
+                  type="number"
+                  step="any"
+                  value={draft.thresholds[0]}
+                  onChange={(e) => setDraft({ ...draft, thresholds: [Number(e.target.value), draft.thresholds[1]] })}
+                  className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm tabular-nums focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-[var(--muted)]">
+                  {draft.direction === "higher" ? "Good (→100)" : draft.direction === "lower" ? "Bad (→0)" : "Band high"}
+                </span>
+                <input
+                  type="number"
+                  step="any"
+                  value={draft.thresholds[1]}
+                  onChange={(e) => setDraft({ ...draft, thresholds: [draft.thresholds[0], Number(e.target.value)] })}
+                  className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm tabular-nums focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            <label className="block">
+              <span className="text-xs text-[var(--muted)]">Description (optional)</span>
+              <input
+                value={draft.description}
+                maxLength={160}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                placeholder="How to read this indicator"
+                className="w-full mt-1 px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+              />
+            </label>
+
+            {draftErr && (
+              <p className="text-xs text-red-500 dark:text-red-400">⚠ {draftErr}</p>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <span className="text-[11px] text-[var(--muted)]">
+                {custom.length} / {MAX_CUSTOM} custom indicators · saved on this device
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={closeEditor}
+                  className="px-3 py-2 text-sm rounded-lg border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveDraft}
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+                >
+                  Save indicator
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Right-click formula editor for a single indicator */}
       {menu && data && (() => {
         const ind = data.indicators.find((i) => i.id === menu.id);
@@ -1096,7 +1487,7 @@ export default function MegaIndicatorPage() {
             onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
           >
             <div
-              className="absolute w-72 rounded-xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-3 text-xs space-y-2"
+              className="absolute w-80 rounded-xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-3 text-xs space-y-2 max-h-[85vh] overflow-y-auto"
               style={{ left: Math.max(8, px), top: Math.max(8, py) }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -1104,8 +1495,24 @@ export default function MegaIndicatorPage() {
                 <span className="font-semibold text-sm truncate" title={ind.name}>{ind.name}</span>
                 <button onClick={() => setMenu(null)} className="text-[var(--muted)] hover:text-[var(--foreground)]" aria-label="Close">✕</button>
               </div>
+
+              {/* What it does */}
+              <p className="text-[11px] leading-relaxed text-[var(--foreground)]">{ind.description}</p>
+
+              {/* The exact calculation behind the number */}
+              <div className="rounded-lg border border-[var(--card-border)] bg-[var(--card-hover)] p-2">
+                <p className="text-[9.5px] uppercase tracking-wider text-[var(--muted)] mb-1">How it&apos;s calculated</p>
+                <p className="font-mono text-[10.5px] leading-relaxed break-words">
+                  {ind.formula || "—"}
+                </p>
+                <p className="text-[10px] text-[var(--muted)] mt-1.5">
+                  Reading: {ind.direction === "higher" ? "higher is healthier" : ind.direction === "lower" ? "lower is healthier" : "middle of the band is healthiest"}
+                  {" · "}score {scoreWithOverride(ind.value, base, ov).toFixed(1)} / 100
+                </p>
+              </div>
+
               <p className="text-[10px] text-[var(--muted)]">
-                Formula: <b className={changed ? "text-indigo-300" : "text-[var(--foreground)]"}>{formulaLabel(eff)}</b>
+                Scoring rule: <b className={changed ? "text-indigo-300" : "text-[var(--foreground)]"}>{formulaLabel(eff)}</b>
               </p>
 
               <label className="block">
