@@ -8,20 +8,26 @@
 // by comparing them against cells read straight out of the workbook.
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import { parsePriceWorkbook, type PriceRow } from "../src/lib/price-import";
 
 const WORKBOOK = fileURLToPath(new URL("../tehnival analysis 19926.xlsx", import.meta.url));
-const buf = readFileSync(WORKBOOK);
-const parsed = parsePriceWorkbook(buf, "tehnival analysis 19926.xlsx");
+// The workbook is personal data: .gitignore keeps it out of the repo (the repo
+// is public), so it exists on the dev machine and never on a CI runner. Skip
+// the suite there rather than failing a run it cannot possibly satisfy.
+const hasWorkbook = existsSync(WORKBOOK);
+const buf = hasWorkbook ? readFileSync(WORKBOOK) : null;
+const parsedOrNull = hasWorkbook
+  ? parsePriceWorkbook(buf!, "tehnival analysis 19926.xlsx")
+  : null;
 // Read the workbook once — re-parsing it per sheet blows the test timeout.
-const source = XLSX.read(buf, { type: "buffer", cellDates: true });
+const source = hasWorkbook ? XLSX.read(buf!, { type: "buffer", cellDates: true }) : null;
 
 // Read one sheet as a raw matrix so we can compare against the source cells.
 function sheetMatrix(name: string): unknown[][] {
-  return XLSX.utils.sheet_to_json(source.Sheets[name], { header: 1, raw: false, defval: "" }) as unknown[][];
+  return XLSX.utils.sheet_to_json(source!.Sheets[name], { header: 1, raw: false, defval: "" }) as unknown[][];
 }
 
 // First data row of a sheet, keyed by the date it carries.
@@ -55,9 +61,14 @@ function isoOf(v: unknown): string | null {
   return null;
 }
 
-const byDate = new Map<string, PriceRow>(parsed.rows.map((r) => [r.date, r]));
+const byDate = new Map<string, PriceRow>((parsedOrNull?.rows ?? []).map((r) => [r.date, r]));
 
-describe("tehnival analysis 19926.xlsx", () => {
+// describe.skip when the workbook is absent: the checks below still register
+// on the dev machine, where the file exists.
+const suite = hasWorkbook ? describe : describe.skip;
+
+suite("tehnival analysis 19926.xlsx", () => {
+  const parsed = parsedOrNull!;
   it("imports every sheet, not just the ones with a proper header", () => {
     expect(parsed.sheets.map((s) => s.sheet).sort()).toEqual(
       ["31026", "61026", "Sheet1", "Sheet2", "Sheet3", "Sheet4"]
