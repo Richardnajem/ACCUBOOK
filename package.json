@@ -109,7 +109,8 @@
     "publish": {
       "provider": "github",
       "owner": "Richardnajem",
-      "repo": "ACCUBOOK"
+      "repo": "ACCUBOOK",
+      "releaseType": "release"
     }
   }
 }

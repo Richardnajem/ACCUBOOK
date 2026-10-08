@@ -46,3 +46,18 @@ jobs:
           # electron-builder hunt for one (and fail) on the runner. Windows
           # will keep showing SmartScreen until a real certificate is added.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # electron-publish's GitHub publisher defaults to a DRAFT release, whose
+      # assets return 404 — v2.3.0 shipped that way and had to be published by
+      # hand. releaseType in package.json prevents it; this check makes sure it
+      # never silently happens again.
+      - name: Verify the release is published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          draft=$(gh release view "${{ github.ref_name }}" --json isDraft -q .isDraft)
+          echo "release ${{ github.ref_name }} draft=$draft"
+          if [ "$draft" = "true" ]; then
+            echo "::error::Release ${{ github.ref_name }} is still a draft - assets would 404"
+            exit 1
+          fi
