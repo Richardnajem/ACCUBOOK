@@ -90,9 +90,12 @@ ipcMain.handle("updates:version", () => app.getVersion());
 
 const isDev = !app.isPackaged;
 
-// Where the packaged Next.js app lives (electron-builder "files" copies the
-// whole project dir into resources/app when asar is disabled).
-const PACKAGED_APP_DIR = path.join(process.resourcesPath || "", "app");
+// Where the packaged Next.js app lives. With ASAR enabled (one app.asar file
+// instead of ~14,778 loose ones) this points at the archive — Electron's
+// patched fs reads straight out of it, including from the ELECTRON_RUN_AS_NODE
+// child process that runs the Next server. app.getAppPath() resolves correctly
+// whether the build is packed or unpacked.
+const PACKAGED_APP_DIR = app.getAppPath();
 const APP_ROOT = isDev ? path.join(__dirname, "..") : PACKAGED_APP_DIR;
 
 let PORT = 3456;
@@ -247,10 +250,12 @@ function setupDatabase() {
     // when the app exits. electron-builder's portable target sets
     // PORTABLE_EXECUTABLE_DIR to the real folder containing the .exe, so keep
     // data/ there: it persists and travels with the file when copied to
-    // another PC. Installed (NSIS) builds don't set that env var and keep
-    // data/ next to the installed app, as before.
-    const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR || PACKAGED_APP_DIR;
-    const dataDir = path.join(portableRoot, "data");
+    // another PC. Installed (NSIS) builds don't set that env var; with ASAR the
+    // app dir is a read-only archive, so their data lives in userData.
+    const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR || null;
+    const dataDir = portableRoot
+      ? path.join(portableRoot, "data")
+      : path.join(app.getPath("userData"), "data");
     fs.mkdirSync(dataDir, { recursive: true });
     DATA_DIR = dataDir;
     const marker = path.join(dataDir, "portable.txt");
@@ -441,7 +446,10 @@ function createWindow() {
 function getIcon() {
   const iconPath = path.join(APP_ROOT, "public", "icon.png");
   try {
-    if (fs.existsSync(iconPath)) return nativeImage.createFromPath(iconPath);
+    // Reading out of the ASAR can yield an empty image on some platforms —
+    // treat that the same as "no icon" so the window keeps the exe's own icon.
+    const img = nativeImage.createFromPath(iconPath);
+    if (!img.isEmpty()) return img;
   } catch {}
   return undefined;
 }

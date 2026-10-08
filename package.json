@@ -60,7 +60,11 @@
     "directories": {
       "output": "release"
     },
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "**/better-sqlite3/**"
+    ],
     "npmRebuild": false,
     "files": [
       "electron/**/*",
