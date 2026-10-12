@@ -144,22 +144,36 @@ npm run dist             # build + electron-builder installer
 migrate on the fly.
 
 **Packaged app (auto-update):** the Electron shell ships `electron-updater` wired to
-GitHub Releases. To make it live:
+GitHub Releases, and releases come from the tag-driven workflow:
 
-1. Create a GitHub repo and set `build.publish` in `package.json`
-   (`owner` / `repo` — replace the `SET-ME-*` placeholders).
-2. Bump `version` in `package.json`, run `npm run dist`.
-3. Draft a GitHub release tagged `v<version>` and upload the installer **plus** the
-   generated `latest.yml` (and blockmap) files.
+**Releasing a new version:** bump `version` in `package.json`, commit, then push
+a matching tag — `git tag v2.4.1 && git push origin v2.4.1`. The `Release`
+workflow builds the installers on a Windows runner and publishes them itself: the
+Setup `.exe`, the portable `.exe`, their blockmaps and `latest.yml`. It fails
+rather than shipping a release whose `latest.yml` is missing, because that is the
+file every install reads to see whether an update exists.
 
-Installed apps then check GitHub on every launch: an in-app notice offers the update,
-it downloads in the background and installs on quit. With the placeholders unset — or
-offline — the whole check silently no-ops.
+Installed apps then check GitHub on every launch and offer whatever the newest
+release holds. Offline, the whole check silently no-ops.
 
 **Your data survives updates** (trades, watchlist, price cache, mega-history cache):
-portable builds keep it in `data/` next to the app; installed builds in the OS userData
-folder. As with any update, use the in-app **Backup / Restore** (one-click JSON export)
-first for a belt-and-braces copy.
+portable builds keep it in `data/` next to the `.exe` — copy that folder to move
+everything to another PC — and installed builds keep it in the OS userData folder,
+which an in-place update never touches. Settings → **Data & backups** takes a
+snapshot and restores one, so take one before a big update.
+
+**Updating the copy on another computer** depends on what travelled with it:
+
+- **The project folder:** `git pull`, `npm install`, then `start.bat`. The schema
+  and caches migrate on the fly and `portfolio.db` stays where it is.
+- **A portable `.exe`:** `start.bat update`, Settings → **Check for Updates** and
+  the release page all hand you the *installer*, which keeps its data in userData,
+  not in the `data/` folder beside the portable file. To stay portable, download
+  `Stockfolio-Portable-<version>.exe` yourself and swap the file, leaving `data/`
+  alone. To move to an installed copy instead, install first, then restore a
+  backup from the portable folder.
+- **An installed copy:** Settings → **Check for Updates** installs in place; your
+  data is in userData either way.
 
 ## Tech Stack
 

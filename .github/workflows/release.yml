@@ -2,7 +2,7 @@
 # of on the dev machine — local packaging kept dying with OOM (commit charge
 # dipped to ~112 MB while 7-Zip compressed the payload).
 #
-# Trigger: push a version tag (`git tag v2.3.0 && git push origin v2.3.0`) or
+# Trigger: push a version tag (`git tag v2.4.1 && git push origin v2.4.1`) or
 # run it manually from the Actions tab.
 name: Release
 
@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: windows-latest
     permissions:
-      contents: write # electron-builder publishes a GitHub Release with this
+      contents: write # creates the release and uploads its assets
     steps:
       - uses: actions/checkout@v5
 
@@ -38,26 +38,41 @@ jobs:
       - name: Convert dependency symlinks to real copies
         run: node scripts/depsymlinks.cjs
 
-      - name: Package + publish
-        run: npx electron-builder --publish always
+      # --publish never: electron-builder only produces the artifacts here. Its
+      # own publisher raced itself with two win targets — it starts one
+      # publisher per target and the process exited while the blockmap,
+      # portable exe and latest.yml uploads were still in flight. v2.4.0
+      # shipped with just the Setup .exe and no latest.yml, which 404s the
+      # in-app updater for everyone.
+      - name: Package
+        run: npx electron-builder --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No signing certificate is configured yet, so don't let
           # electron-builder hunt for one (and fail) on the runner. Windows
           # will keep showing SmartScreen until a real certificate is added.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      # electron-publish's GitHub publisher defaults to a DRAFT release, whose
-      # assets return 404 — v2.3.0 shipped that way and had to be published by
-      # hand. releaseType in package.json prevents it; this check makes sure it
-      # never silently happens again.
-      - name: Verify the release is published
+      # Uploading the finished artifacts ourselves is sequential, and this step
+      # fails loudly if latest.yml — the file electron-updater reads to decide
+      # whether an update exists — is missing.
+      - name: Publish the release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          draft=$(gh release view "${{ github.ref_name }}" --json isDraft -q .isDraft)
-          echo "release ${{ github.ref_name }} draft=$draft"
-          if [ "$draft" = "true" ]; then
-            echo "::error::Release ${{ github.ref_name }} is still a draft - assets would 404"
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
             exit 1
           fi
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes
+          gh release upload "$tag" release/*.exe release/*.blockmap release/latest.yml --clobber
+          gh release edit "$tag" --draft=false --latest
+          gh release view "$tag" --json isDraft,assets -q '"draft=\(.isDraft)", (.assets[] | "asset \(.name) \(.size)")'
+          # electron-updater needs the newest release to carry latest.yml; a
+          # draft or an incomplete upload would leave every install stuck.
+          gh release view "$tag" --json isDraft,assets -q '.isDraft' | grep -qx false
+          gh release view "$tag" --json assets -q '.assets[].name' | grep -qx latest.yml

@@ -242,9 +242,9 @@ export default function SettingsPage() {
             (last 30 kept).
           </li>
           <li>
-            In the packaged app your data lives in a{" "}
+            Portable builds keep your data in a{" "}
             <code className="text-xs bg-[var(--input-bg)] px-1 py-0.5 rounded border border-[var(--input-border)]">data\</code>{" "}
-            folder next to the app — copy it to move everything to another PC.
+            folder next to the .exe — copy it to move everything to another PC. An installed copy keeps it in the OS user-data folder instead.
           </li>
         </ul>
       </section>
