@@ -12,7 +12,7 @@
 // their centered variant reads future bars. The score at date D therefore uses
 // exclusively data up to D, so it is safe to trade on bar-by-bar.
 
-import { ALL_SPECS, MA_PERIODS, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
+import { ALL_SPECS, MA_PERIODS, effectiveWeight, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
 import {
   sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
   adx, mfi, obv, keltnerPosition, aroon, superTrend,
@@ -199,7 +199,7 @@ export function computeMegaScoreSeries(
     for (const spec of specsToScore) {
       const s = indicators[spec.id]?.[i];
       if (s === undefined || !Number.isFinite(s)) continue;
-      const w = Math.max(0, weights?.[spec.id] ?? 1);
+      const w = effectiveWeight(spec, weights);
       if (w <= 0) continue;
       wVal += s * w;
       wSum += w;

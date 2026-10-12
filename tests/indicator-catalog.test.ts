@@ -20,9 +20,10 @@ import {
   adx, mfi, obv, keltner, keltnerPosition, aroon, superTrend, atr, sma, rsi,
 } from "../src/lib/ta";
 import {
-  ALL_SPECS, OPTIONAL_SPECS, computeMegaIndicator, defaultWeights, evenWeights,
+  ALL_SPECS, OPTIONAL_SPECS, computeMegaIndicator, defaultWeights, effectiveWeight, evenWeights,
 } from "../src/lib/mega-indicator";
 import { suggestIndicators, median, MAX_SUGGESTIONS, type SuggestionContext } from "../src/lib/indicator-suggestions";
+import { isEvenWeights } from "../src/lib/mega-prefs";
 import { computeMegaScoreSeries } from "../src/lib/mega-score";
 
 // ─── Deterministic OHLCV with enough history for every warm-up ───
@@ -478,5 +479,59 @@ describe("indicator suggestions", () => {
     // rsi() and sma() stay wired to the same catalogue the suggester reads.
     expect(rsi(bars.close, 14).length).toBe(bars.close.length);
     expect(sma(bars.close, 20).length).toBe(bars.close.length);
+  });
+});
+
+
+describe("weight fallbacks — one rule for the server, the page and the backtest", () => {
+  const technical: Record<string, number> = {};
+  for (const spec of ALL_SPECS) technical[spec.id] = (spec.thresholds[0] + spec.thresholds[1]) / 2;
+
+  // A map written before the catalogue existed: built-ins at 1, no catalogue keys.
+  const builtInsOnly: Record<string, number> = {};
+  for (const spec of ALL_SPECS) if (!spec.optional) builtInsOnly[spec.id] = 1;
+
+  it("a saved map from before the catalogue does not pull the catalogue in", () => {
+    const partial = computeMegaIndicator({ technical, weights: builtInsOnly });
+    const expected = computeMegaIndicator({ technical, weights: defaultWeights(ALL_SPECS) });
+    expect(partial.score).toBeCloseTo(expected.score, 10);
+    expect(partial.indicators.length).toBe(expected.indicators.length);
+    expect(partial.indicators.filter((i) => i.enabled).length).toBe(
+      expected.indicators.filter((i) => i.enabled).length
+    );
+    for (const spec of OPTIONAL_SPECS) {
+      const ind = partial.indicators.find((i) => i.id === spec.id);
+      expect(ind, spec.id + " is in the payload").toBeDefined();
+      expect(ind!.weight).toBe(0);
+      expect(ind!.enabled).toBe(false);
+    }
+  });
+
+  it("effectiveWeight: built-ins 1, catalogue 0, an explicit weight always wins", () => {
+    expect(effectiveWeight({ id: "ta-rsi-14" }, null)).toBe(1);
+    expect(effectiveWeight({ id: "ta-adx-14", optional: true }, null)).toBe(0);
+    expect(effectiveWeight({ id: "ta-adx-14", optional: true }, { "ta-adx-14": 3 })).toBe(3);
+    expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": 0 })).toBe(0);
+    expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": -2 })).toBe(0);
+  });
+
+  it("the payload says which indicators are catalogue ones", () => {
+    const res = computeMegaIndicator({ technical, weights: defaultWeights(ALL_SPECS) });
+    for (const spec of OPTIONAL_SPECS) {
+      const ind = res.indicators.find((i) => i.id === spec.id);
+      expect(ind?.optional, spec.id).toBe(true);
+    }
+    expect(res.indicators.find((i) => i.id === "ta-rsi-14")?.optional).toBe(false);
+  });
+
+  it("isEvenWeights means 'the same as defaultWeights', not merely all-ones", () => {
+    expect(isEvenWeights(null)).toBe(true);
+    expect(isEvenWeights({ ...builtInsOnly })).toBe(true);
+    expect(isEvenWeights(defaultWeights(ALL_SPECS))).toBe(true);
+    // All-ones over the catalogue is a deliberate choice: it has to travel to the
+    // API, otherwise the page shows a composite the server never computed.
+    expect(isEvenWeights(evenWeights(ALL_SPECS))).toBe(false);
+    // So is switching a built-in off.
+    expect(isEvenWeights({ ...builtInsOnly, "ta-rsi-14": 0 })).toBe(false);
   });
 });

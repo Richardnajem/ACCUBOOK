@@ -6,7 +6,7 @@ import {
   ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell,
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
-import { scoreColor, scoreLabel, WeightMap } from "@/lib/mega-indicator";
+import { effectiveWeight, scoreColor, scoreLabel, WeightMap } from "@/lib/mega-indicator";
 import {
   scoreWithOverride,
   mergeFormula,
@@ -562,17 +562,17 @@ export default function MegaIndicatorPage() {
   // while the server value is the source of truth after each fetch.
   const view = useMemo(() => {
     if (!data) return null;
-    const enabled = scored.filter((i) => (weights[i.id] ?? 1) > 0);
-    const tw = enabled.reduce((s, i) => s + (weights[i.id] ?? 1), 0);
-    const score = tw > 0 ? enabled.reduce((s, i) => s + i.score * (weights[i.id] ?? 1), 0) / tw : 50;
+    const enabled = scored.filter((i) => effectiveWeight(i, weights) > 0);
+    const tw = enabled.reduce((s, i) => s + effectiveWeight(i, weights), 0);
+    const score = tw > 0 ? enabled.reduce((s, i) => s + i.score * effectiveWeight(i, weights), 0) / tw : 50;
     const cats: Record<string, { ws: number; wsum: number }> = {};
     for (const i of enabled) {
       if (!cats[i.category]) cats[i.category] = { ws: 0, wsum: 0 };
-      cats[i.category].ws += i.score * (weights[i.id] ?? 1);
-      cats[i.category].wsum += weights[i.id] ?? 1;
+      cats[i.category].ws += i.score * effectiveWeight(i, weights);
+      cats[i.category].wsum += effectiveWeight(i, weights);
     }
     const contributions = enabled
-      .map((i) => ({ id: i.id, name: i.name, contribution: i.score * (weights[i.id] ?? 1) }))
+      .map((i) => ({ id: i.id, name: i.name, contribution: i.score * effectiveWeight(i, weights) }))
       .sort((a, b) => b.contribution - a.contribution);
     return {
       ...data,
@@ -606,7 +606,7 @@ export default function MegaIndicatorPage() {
   };
 
   const totalEffectiveWeight = useMemo(
-    () => (data?.indicators || []).reduce((s, i) => s + Math.max(0, weights[i.id] ?? 1), 0),
+    () => (data?.indicators || []).reduce((s, i) => s + effectiveWeight(i, weights), 0),
     [data, weights]
   );
 
@@ -622,7 +622,7 @@ export default function MegaIndicatorPage() {
   const [suggestionsHidden, setSuggestionsHidden] = useState(false);
   const suggestions = data?.suggestions ?? [];
   const inCompositeCount = data
-    ? data.indicators.filter((i) => (weights[i.id] ?? (i.optional ? 0 : 1)) > 0).length
+    ? data.indicators.filter((i) => effectiveWeight(i, weights) > 0).length
     : 0;
 
   const grouped = useMemo(() => {
@@ -1179,7 +1179,7 @@ export default function MegaIndicatorPage() {
               {Object.entries(grouped).map(([cat, items]) => {
                 const open = expandedCat === cat || search.length > 0;
                 const catAvg = items.reduce((s, i) => s + i.score, 0) / items.length;
-                const catWeight = items.reduce((s, i) => s + Math.max(0, weights[i.id] ?? (i.optional ? 0 : 1)), 0);
+                const catWeight = items.reduce((s, i) => s + effectiveWeight(i, weights), 0);
                 return (
                   <div key={cat} className="border border-[var(--card-border)] rounded-xl overflow-hidden">
                     <button
@@ -1203,7 +1203,7 @@ export default function MegaIndicatorPage() {
                     {open && (
                       <div className="divide-y divide-[var(--card-border)]">
                         {items.map((ind) => {
-                          const w = weights[ind.id] ?? (ind.optional ? 0 : 1);
+                          const w = effectiveWeight(ind, weights);
                           const wPct = totalEffectiveWeight > 0 ? (Math.max(0, w) / totalEffectiveWeight) * 100 : 0;
                           return (
                             <div key={ind.id}
@@ -1540,7 +1540,7 @@ export default function MegaIndicatorPage() {
         const changed = isFormulaChanged(base, ov);
         const px = typeof window !== "undefined" ? Math.min(menu.x, window.innerWidth - 300) : menu.x;
         const py = typeof window !== "undefined" ? Math.min(menu.y, window.innerHeight - 350) : menu.y;
-        const w = weights[ind.id] ?? 1;
+        const w = effectiveWeight(ind, weights);
         return (
           <div
             className="fixed inset-0 z-50"

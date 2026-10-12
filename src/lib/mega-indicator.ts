@@ -37,6 +37,7 @@ export interface MegaIndicator {
   value: number;
   score: number;      // 0-100 health score (normalized)
   weight: number;     // user weight (arbitrary scale, normalized across all)
+  optional?: boolean; // catalogue indicator: starts outside the composite
   enabled: boolean;   // excluded indicators don't affect the composite
   direction: Direction;
   thresholds: [number, number];
@@ -315,6 +316,22 @@ export function evenWeights(specs: IndicatorSpec[]): WeightMap {
   return w;
 }
 
+/**
+ * The single rule for what a weight means, shared by the API route, the
+ * dashboard's instant recompute and the backtest series: built-ins count 1
+ * out of the box, the catalogue counts 0 until something adds it, and an
+ * explicit weight always wins. Reading it from one place is what stops the
+ * displayed composite and the server's composite from disagreeing when a
+ * saved weight map predates an indicator.
+ */
+export function effectiveWeight(
+  spec: { id: string; optional?: boolean },
+  weights: WeightMap | null | undefined,
+): number {
+  const raw = weights?.[spec.id];
+  return Math.max(0, raw ?? (spec.optional ? 0 : 1));
+}
+
 /** Every spec that takes part in this computation: built-ins + any custom. */
 function specsFor(input: Pick<MegaInput, "custom">): IndicatorSpec[] {
   return input.custom?.length ? [...ALL_SPECS, ...input.custom] : ALL_SPECS;
@@ -328,6 +345,7 @@ export function computeMegaIndicator(input: MegaInput): MegaResult {
   const indicators: MegaIndicator[] = [];
   for (const spec of specs) {
     const raw = input.technical[spec.id];
+    const w = effectiveWeight(spec, weights);
     if (raw === undefined || !Number.isFinite(raw)) continue; // missing data
     indicators.push({
       id: spec.id,
@@ -335,9 +353,10 @@ export function computeMegaIndicator(input: MegaInput): MegaResult {
       category: spec.category,
       unit: spec.unit,
       value: raw,
+      optional: spec.optional ?? false,
       score: Math.round(normalizeScore(raw, spec) * 10) / 10,
-      weight: Math.max(0, weights[spec.id] ?? 1),
-      enabled: !excludedSet.has(spec.id) && (weights[spec.id] ?? 1) > 0,
+      weight: w,
+      enabled: !excludedSet.has(spec.id) && w > 0,
       direction: spec.direction,
       thresholds: spec.thresholds,
       description: spec.description,
