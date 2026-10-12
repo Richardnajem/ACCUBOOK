@@ -24,6 +24,8 @@ export interface IndicatorSpec {
   description: string;
   /** The exact calculation, written out — shown verbatim in the UI. */
   formula: string;
+  /** Computed for every ticker but kept out of the composite until it is added. */
+  optional?: boolean;
 }
 
 /** One computed indicator, ready to display. */
@@ -94,6 +96,15 @@ export const TECHNICAL_SPECS: IndicatorSpec[] = [
   T("ta-stoch-d", "Stochastic %D (14,3,3)", "%", "band", [20, 80],
     "Signal line of the stochastic oscillator (3-period average of %K). 20-80 healthy; crossing %K signals momentum turns.",
     "%D = SMA(3, %K)"),
+  T("ta-williams-r", "Williams %R (14)", "%", "band", [-80, -20],
+    "Where the close sits inside the 14-day high-low range, quoted upside-down: −100 at the low, 0 at the high. Below −80 oversold, above −20 overbought.",
+    "%R = −100 · (HH(14) − close)/(HH(14) − LL(14)),  HH = max(H, 14),  LL = min(L, 14)"),
+  T("ta-stochrsi-k", "StochRSI %K (14,14,3)", "%", "band", [20, 80],
+    "RSI's own position inside its 14-day range — reacts far faster than RSI. 20-80 healthy; below 20 oversold, above 80 overbought.",
+    "raw = (RSI(14) − min(RSI, 14))/(max(RSI, 14) − min(RSI, 14));  %K = SMA(3, raw)"),
+  T("ta-stochrsi-d", "StochRSI %D (14,14,3)", "%", "band", [20, 80],
+    "Signal line of the Stochastic RSI (3-period average of %K). Its crossings with %K mark momentum turns earlier than RSI.",
+    "%D = SMA(3, %K)"),
   T("ta-cci-20", "CCI (20)", "", "band", [-100, 100],
     "Commodity Channel Index over 20 bars. Inside ±100 is normal; beyond = extended move.",
     "TP = (H+L+close)/3;  CCI = (TP − SMA(20,TP)) / (0.015 · MAD),  MAD = mean|TP − SMA(20,TP)| over 20 bars"),
@@ -134,7 +145,52 @@ for (const p of MA_PERIODS) {
   );
 }
 
-export const ALL_SPECS: IndicatorSpec[] = [...TECHNICAL_SPECS];
+// ─── Catalogue: optional indicators ─────────────────────────────
+// Every indicator below is computed for every ticker and listed in the weights
+// panel, but stays out of the composite until it is added (its default weight is
+// 0 — see defaultWeights). lib/indicator-suggestions ranks which of them are
+// worth adding for the ticker at hand, and the page offers a one-click "Add".
+// O() is the T()/M() pair above plus the `optional` flag.
+
+const O = (
+  id: string,
+  name: string,
+  category: string,
+  unit: string,
+  direction: Direction,
+  thresholds: [number, number],
+  description: string,
+  formula: string
+): IndicatorSpec => ({
+  id, name, category, unit, direction, thresholds, description, formula, optional: true,
+});
+
+export const OPTIONAL_SPECS: IndicatorSpec[] = [
+  O("ta-adx-14", "ADX (14)", "Trend", "", "higher", [20, 40],
+    "Trend strength, not direction. Under 20 the market is choppy, over 40 it is trending hard. Pair it with +DI/−DI from the same calculation to see which side is winning.",
+    "TR = max(H−L, |H−close₁|, |L−close₁|);  +DM = (H−H₁ > L₁−L and H−H₁ > 0) ? H−H₁ : 0 (mirrored for −DM);  +DI = 100·S(+DM)/S(TR), −DI likewise, S = Wilder smoothing;  DX = 100·|+DI − −DI|/(+DI + −DI);  ADX = S(DX)"),
+  O("ta-supertrend", "SuperTrend (10, 3)", "Trend", "%", "higher", [-2, 2],
+    "How far price sits from the ATR-trailing SuperTrend line, in % of price. Holding above the line is an uptrend regime, dropping below it is a downtrend — one of the cleanest trend/stop signals there is.",
+    "Upper/Lower = (H+L)/2 ± 3·ATR(10);  each band ratchets toward price and flips only when the close crosses it;  value = (close − line)/line · 100"),
+  O("ta-aroon-osc", "Aroon Oscillator (25)", "Trend", "", "band", [-50, 50],
+    "Whether the 25-bar highs or the 25-bar lows are fresher. Above 50 the highs are recent (uptrend building), below −50 the lows are — a quick read on trend age.",
+    "Up = 100·(25 − bars since the highest high)/25 over the latest 26 bars;  Down likewise for the lowest low;  Oscillator = Up − Down"),
+  O("ta-mfi-14", "Money Flow Index (14)", "Momentum", "", "band", [20, 80],
+    "RSI weighted by the money that actually changed hands. 20-80 is normal; above 80 is an overbought move with volume behind it, below 20 an oversold one.",
+    "TP = (H+L+C)/3;  MF = TP·volume;  MFR = Σ(MF over up-TP bars, 14) / Σ(MF over down-TP bars, 14);  MFI = 100 − 100/(1 + MFR)"),
+  O("ta-obv-20", "OBV vs 20-Bar Average", "Volume", "d", "higher", [-1, 1],
+    "On-Balance Volume against its own 20-bar average, measured in average days of volume. Positive means volume is accumulating on up days (buying pressure), negative means it is being distributed.",
+    "OBVₜ = OBVₜ₋₁ + volume on an up-close, − volume on a down-close;  value = (OBV − SMA(20, OBV)) / SMA(20, volume)"),
+  O("ta-kc-pos", "Keltner Position (20, 10, 2)", "Volatility", "%", "band", [20, 80],
+    "Where price sits inside the Keltner channel — the ATR-driven cousin of the Bollinger bands. 0 is the lower band, 100 the upper.",
+    "%K = (close − Lower)/(Upper − Lower)·100,  Middle = EMA(20, close),  Upper/Lower = Middle ± 2·ATR(10)"),
+];
+
+/** Catalogue ids, for quick membership checks. */
+export const OPTIONAL_IDS: ReadonlySet<string> = new Set(OPTIONAL_SPECS.map((s) => s.id));
+
+/** Every spec the app knows about: the built-ins plus the catalogue. */
+export const ALL_SPECS: IndicatorSpec[] = [...TECHNICAL_SPECS, ...OPTIONAL_SPECS];
 
 /**
  * Build an IndicatorSpec for a user-defined (custom) indicator. Custom
@@ -242,6 +298,16 @@ export interface MegaInput {
   excluded?: string[];
 }
 
+/**
+ * Default weights: 1 for the built-ins, 0 for the catalogue. A composite should
+ * only contain what the user — or a suggestion they accepted — put there.
+ */
+export function defaultWeights(specs: IndicatorSpec[]): WeightMap {
+  const w: WeightMap = {};
+  for (const s of specs) w[s.id] = s.optional ? 0 : 1;
+  return w;
+}
+
 /** Preset — spread weight evenly across all indicators. */
 export function evenWeights(specs: IndicatorSpec[]): WeightMap {
   const w: WeightMap = {};
@@ -256,7 +322,7 @@ function specsFor(input: Pick<MegaInput, "custom">): IndicatorSpec[] {
 
 export function computeMegaIndicator(input: MegaInput): MegaResult {
   const specs = specsFor(input);
-  const weights = input.weights || evenWeights(specs);
+  const weights = input.weights || defaultWeights(specs);
   const excludedSet = new Set(input.excluded || []);
 
   const indicators: MegaIndicator[] = [];

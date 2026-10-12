@@ -31,6 +31,7 @@ import {
   type CustomIndicatorDef,
 } from "@/lib/custom-indicators";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
+import type { Suggestion } from "@/lib/indicator-suggestions";
 
 interface MegaIndicator {
   id: string;
@@ -46,6 +47,8 @@ interface MegaIndicator {
   description: string;
   /** Exact calculation, shown in the right-click inspector. */
   formula: string;
+  /** Catalogue indicator that is not part of the composite until it is added. */
+  optional?: boolean;
 }
 
 interface MegaCategory { category: string; score: number; weightShare: number; }
@@ -68,6 +71,8 @@ interface MegaResponse {
   warnings?: string[];
   /** How many user-defined indicators evaluated successfully. */
   customCount?: number;
+  /** Ranked suggestions from lib/indicator-suggestions. */
+  suggestions?: Suggestion[];
   error?: string;
 }
 
@@ -177,6 +182,10 @@ const categoryIcons: Record<string, string> = {
   Technical: "📉",
   "Moving Averages": "📈",
   Custom: "🧩",
+  Trend: "🧭",
+  Momentum: "🚀",
+  Volume: "📊",
+  Volatility: "🌊",
 };
 
 type Preset = "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
@@ -185,14 +194,14 @@ const PRESETS: Array<{ key: Preset; label: string; hint: string }> = [
   { key: "all", label: "⚖️ Everything", hint: "All indicators equally weighted" },
   { key: "trend", label: "🧭 Trend", hint: "Trend, MAs and kernel slope emphasized" },
   { key: "momentum", label: "🚀 Momentum", hint: "RSI, MACD and 3-month momentum emphasized" },
-  { key: "reversal", label: "🔄 Mean Reversion", hint: "Bollinger position, RSI band and 52w distance emphasized" },
+  { key: "reversal", label: "🔄 Mean Reversion", hint: "Bollinger position, RSI / StochRSI bands, Williams %R and 52w distance emphasized" },
   { key: "smooth", label: "🌊 Smooth Trends", hint: "Clean trends rewarded — efficiency ratio and kernel residual emphasized" },
 ];
 
 // Concrete weight maps per preset (indicator ids match lib/mega-indicator specs)
 function presetWeights(p: Preset, indicators: MegaIndicator[]): WeightMap {
   const base: WeightMap = {};
-  for (const ind of indicators) base[ind.id] = 1;
+  for (const ind of indicators) base[ind.id] = ind.optional ? 0 : 1;
   const setMany = (pred: (i: MegaIndicator) => boolean, w: number) => {
     for (const ind of indicators) if (pred(ind)) base[ind.id] = w;
   };
@@ -208,7 +217,7 @@ function presetWeights(p: Preset, indicators: MegaIndicator[]): WeightMap {
       setMany((i) => i.id === "ta-vol-ratio", 2);
       break;
     case "reversal":
-      setMany((i) => ["ta-bb-pos", "ta-rsi-14", "ta-dist-52w-high"].includes(i.id), 4);
+      setMany((i) => ["ta-bb-pos", "ta-rsi-14", "ta-stochrsi-k", "ta-williams-r", "ta-dist-52w-high"].includes(i.id), 4);
       setMany((i) => i.id === "ta-atr-pct", 2);
       break;
     case "smooth":
@@ -301,7 +310,8 @@ export default function MegaIndicatorPage() {
             setWeights(stored);
           } else {
             const init: WeightMap = {};
-            for (const ind of json.indicators) init[ind.id] = 1;
+            // Catalogue indicators start outside the composite.
+            for (const ind of json.indicators) init[ind.id] = ind.optional ? 0 : 1;
             setWeights(init);
           }
         }
@@ -608,6 +618,12 @@ export default function MegaIndicatorPage() {
       ).length,
     [data, overrides]
   );
+
+  const [suggestionsHidden, setSuggestionsHidden] = useState(false);
+  const suggestions = data?.suggestions ?? [];
+  const inCompositeCount = data
+    ? data.indicators.filter((i) => (weights[i.id] ?? (i.optional ? 0 : 1)) > 0).length
+    : 0;
 
   const grouped = useMemo(() => {
     const g: Record<string, MegaIndicator[]> = {};
@@ -1072,6 +1088,58 @@ export default function MegaIndicatorPage() {
             </ResponsiveContainer>
           </ChartPanel>
 
+          {/* ─── Suggested for this ticker ─────────────────────── */}
+          {suggestions.length > 0 && !suggestionsHidden && (
+            <ChartPanel
+              id="suggestions"
+              title="Suggested for this ticker"
+              right={
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[var(--muted)]">
+                    From this market state, not from a preset
+                  </span>
+                  <button
+                    onClick={() => setSuggestionsHidden(true)}
+                    title="Hide these suggestions until you analyse again"
+                    className="text-xs px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+                  >
+                    Hide
+                  </button>
+                </div>
+              }
+            >
+              <div className="space-y-2">
+                {suggestions.map((s) => (
+                  <div
+                    key={s.id}
+                    className="flex flex-wrap items-start gap-3 rounded-lg border border-[var(--card-border)] bg-[var(--card-hover)]/40 px-3 py-2.5"
+                  >
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        s.kind === "add" ? "bg-emerald-500/15 text-emerald-300" : "bg-indigo-500/15 text-indigo-300"
+                      }`}
+                    >
+                      {s.kind === "add" ? "ADD" : "BOOST"}
+                    </span>
+                    <div className="min-w-0 flex-1 basis-64">
+                      <div className="text-sm font-medium flex items-center gap-2">
+                        {s.name}
+                        <span className="text-[10px] text-[var(--muted)]">weight {s.weight}</span>
+                      </div>
+                      <p className="text-[11px] text-[var(--muted)]">{s.reason}</p>
+                    </div>
+                    <button
+                      onClick={() => setWeight(s.id, s.weight)}
+                      title={`Set ${s.name} to weight ${s.weight}`}
+                      className="text-xs px-2.5 py-1.5 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 font-medium"
+                    >
+                      {s.kind === "add" ? "Add to composite" : `Set weight ${s.weight}`}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </ChartPanel>
+          )}
           {/* ─── Weight sliders grouped by category ────────────── */}
           <ChartPanel
             id="weights"
@@ -1092,7 +1160,7 @@ export default function MegaIndicatorPage() {
                   className="px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none w-48"
                 />
                 <span className="text-xs text-[var(--muted)]">
-                  Total weight: <b className="text-[var(--foreground)]">{totalEffectiveWeight.toFixed(1)}</b> across {data?.indicators.length} indicators
+                  Total weight: <b className="text-[var(--foreground)]">{totalEffectiveWeight.toFixed(1)}</b> across {inCompositeCount} of {data?.indicators.length} indicators
                   <span className="hidden sm:inline"> · right-click an indicator to edit its formula</span>
                 </span>
                 {customFormulaCount > 0 && (
@@ -1111,7 +1179,7 @@ export default function MegaIndicatorPage() {
               {Object.entries(grouped).map(([cat, items]) => {
                 const open = expandedCat === cat || search.length > 0;
                 const catAvg = items.reduce((s, i) => s + i.score, 0) / items.length;
-                const catWeight = items.reduce((s, i) => s + Math.max(0, weights[i.id] ?? 1), 0);
+                const catWeight = items.reduce((s, i) => s + Math.max(0, weights[i.id] ?? (i.optional ? 0 : 1)), 0);
                 return (
                   <div key={cat} className="border border-[var(--card-border)] rounded-xl overflow-hidden">
                     <button
@@ -1135,7 +1203,7 @@ export default function MegaIndicatorPage() {
                     {open && (
                       <div className="divide-y divide-[var(--card-border)]">
                         {items.map((ind) => {
-                          const w = weights[ind.id] ?? 1;
+                          const w = weights[ind.id] ?? (ind.optional ? 0 : 1);
                           const wPct = totalEffectiveWeight > 0 ? (Math.max(0, w) / totalEffectiveWeight) * 100 : 0;
                           return (
                             <div key={ind.id}
@@ -1183,6 +1251,19 @@ export default function MegaIndicatorPage() {
                                   </span>
                                 </div>
                               </div>
+                              {ind.optional && w <= 0 && (
+                                <div className="mt-1.5 flex items-center gap-2">
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-hover)] text-[var(--muted)]">
+                                    catalogue — not in the composite
+                                  </span>
+                                  <button
+                                    onClick={() => setWeight(ind.id, 1)}
+                                    className="text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10"
+                                  >
+                                    Add
+                                  </button>
+                                </div>
+                              )}
                               <p className="text-[10px] text-[var(--muted)] mt-1 line-clamp-1">{ind.description}</p>
                               <p className="text-[10px] mt-0.5 flex items-center gap-1.5">
                                 <span className="text-[var(--muted)]">

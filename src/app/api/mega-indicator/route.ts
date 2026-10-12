@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDailyBars } from "@/lib/market-data";
-import { sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev } from "@/lib/ta";
-import { MA_PERIODS, computeMegaIndicator, WeightMap } from "@/lib/mega-indicator";
+import {
+  sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
+  adx, mfi, obv, keltnerPosition, aroon, superTrend,
+} from "@/lib/ta";
+import { ALL_SPECS, MA_PERIODS, computeMegaIndicator, defaultWeights, WeightMap } from "@/lib/mega-indicator";
+import { suggestIndicators, median, type SuggestionContext } from "@/lib/indicator-suggestions";
 import { evaluateCustom, sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
 
 export const runtime = "nodejs";
@@ -18,12 +22,14 @@ interface TechnicalRaw {
   customSpecs: ReturnType<typeof evaluateCustom>["specs"];
   /** Readable failures from built-in data loading or custom formulas. */
   warnings: string[];
+  /** The market state the indicator suggester reads (null when there is no data). */
+  context: SuggestionContext | null;
 }
 
 async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[]): Promise<TechnicalRaw> {
   const empty: TechnicalRaw = {
     values: {}, asOf: null, dataSource: "none", ticker: null, error: null,
-    customSpecs: [], warnings: [],
+    customSpecs: [], warnings: [], context: null,
   };
   if (!ticker) return empty;
   try {
@@ -77,6 +83,15 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
     // 5d. 3-day volatility: sample stdev of closes as % of price
     const sd3 = stdev(close, 3);
     const vol3d = Number.isFinite(sd3[last]) && px !== 0 ? (sd3[last] / px) * 100 : NaN;
+
+    // 5e. Williams %R (14) — 0 at the 14-day high, −100 at the 14-day low
+    const wr14 = williamsR(high, low, close, 14);
+    const williamsRVal = Number.isFinite(wr14[last]) ? wr14[last] : NaN;
+
+    // 5f. Stochastic RSI (14,14,3) — fast %K and %D, both 0-100
+    const sr = stochRsi(close, 14, 14, 3, 3);
+    const stochRsiK = Number.isFinite(sr.k[last]) ? sr.k[last] : NaN;
+    const stochRsiD = Number.isFinite(sr.d[last]) ? sr.d[last] : NaN;
 
     // 6. 3-month (~63 trading days) momentum
     const lb = Math.min(63, close.length - 1);
@@ -151,6 +166,37 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
       maValues[`ta-ema-${p}`] = Number.isFinite(e[last]) ? ((px - e[last]) / e[last]) * 100 : NaN;
     }
 
+    // ─── Catalogue: computed for every ticker, added only on request ──
+    const adx14 = adx(high, low, close, 14);
+    const mfi14 = mfi(high, low, close, volume, 14);
+    const obvSeries = obv(close, volume);
+    const obvAvg = sma(obvSeries, 20);
+    const kcPos = keltnerPosition(high, low, close, 20, 10, 2);
+    const aroon25 = aroon(high, low, 25);
+    const stTrend = superTrend(high, low, close, 10, 3);
+    const stLine = stTrend.line[last];
+    const obvDiv =
+      Number.isFinite(obvAvg[last]) && Number.isFinite(volAvg[last]) && volAvg[last] > 0
+        ? (obvSeries[last] - obvAvg[last]) / volAvg[last]
+        : NaN;
+    const stLinePct = Number.isFinite(stLine) && stLine !== 0 ? ((px - stLine) / stLine) * 100 : NaN;
+
+    // Volatility regime: today's ATR% against its own median over the last year.
+    const atrPctHistory: number[] = [];
+    for (let i = Math.max(0, last - 249); i <= last; i++) {
+      if (Number.isFinite(a[i]) && close[i] > 0) atrPctHistory.push((a[i] / close[i]) * 100);
+    }
+
+    const context: SuggestionContext = {
+      adx: adx14.adx[last],
+      efficiency: er10,
+      atrPct,
+      atrPctMedian: median(atrPctHistory),
+      momentum: mom,
+      volumeRatio: volRatio,
+      fromHigh: dist52,
+    };
+
     // User-defined indicators — evaluated once against the same bars.
     const customRes = custom.length
       ? evaluateCustom(custom, {
@@ -168,6 +214,15 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         "ta-stoch-k": stochK,
         "ta-stoch-d": stochD,
         "ta-cci-20": cciVal,
+        "ta-williams-r": williamsRVal,
+        "ta-stochrsi-k": stochRsiK,
+        "ta-stochrsi-d": stochRsiD,
+        "ta-adx-14": adx14.adx[last],
+        "ta-supertrend": stLinePct,
+        "ta-aroon-osc": aroon25.osc[last],
+        "ta-mfi-14": mfi14[last],
+        "ta-obv-20": obvDiv,
+        "ta-kc-pos": kcPos[last],
         "ta-vol-3d": vol3d,
         "ta-mom-63": mom,
         "ta-vol-ratio": volRatio,
@@ -184,6 +239,7 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
       error: null,
       customSpecs: customRes?.specs ?? [],
       warnings: customRes?.errors ?? [],
+      context,
     };
   } catch (e) {
     return { ...empty, ticker, error: e instanceof Error ? e.message : "Failed to load market data." };
@@ -243,10 +299,22 @@ export async function GET(request: NextRequest) {
 
     const technical = await technicalRaw(ticker, custom);
 
+    // Catalogue indicators start outside the composite, so the default weight map
+    // turns every optional spec off until the user adds it.
+    const effectiveWeights = weights ?? defaultWeights(ALL_SPECS);
+    const suggestions = technical.context
+      ? suggestIndicators({
+          context: technical.context,
+          values: technical.values,
+          weights: effectiveWeights,
+          specs: ALL_SPECS,
+        })
+      : [];
+
     const result = computeMegaIndicator({
       technical: technical.values,
       custom: technical.customSpecs,
-      weights,
+      weights: effectiveWeights,
       excluded,
       meta: {
         asOf: technical.asOf,
@@ -257,6 +325,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       ...result,
+      suggestions,
       technicalError: technical.error,
       warnings: customParseError ? [customParseError, ...technical.warnings] : technical.warnings,
       customCount: technical.customSpecs.length,

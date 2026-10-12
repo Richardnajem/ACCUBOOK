@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin } from "../src/lib/ta";
+import {
+  sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin, williamsR, stochRsi,
+} from "../src/lib/ta";
 
 // ─── sma ────────────────────────────────────────────────────────
 describe("sma", () => {
@@ -191,5 +193,126 @@ describe("rollingMax/rollingMin", () => {
     const mn = rollingMin([5, 4, 3, 2, 1], 2);
     expect(mn[4]).toBe(1);
     expect(mn[3]).toBe(2);
+  });
+});
+
+// ─── rolling extremes stay silent through warm-up ───────────────
+describe("rollingMax/rollingMin during warm-up", () => {
+  it("is NaN while the window still holds a warm-up NaN", () => {
+    // Derived series (RSI, %K…) start with NaNs: the extreme of the values that
+    // happen to be defined is not the 3-bar extreme of a 3-bar window.
+    const derived = [NaN, NaN, 10, 12, 11, 15];
+    const mx = rollingMax(derived, 3);
+    const mn = rollingMin(derived, 3);
+    expect(Number.isNaN(mx[2])).toBe(true);
+    expect(Number.isNaN(mn[2])).toBe(true);
+    expect(Number.isNaN(mx[3])).toBe(true);
+    expect(mx[4]).toBe(12);
+    expect(mn[4]).toBe(10);
+    expect(mx[5]).toBe(15);
+  });
+
+  it("is all NaN for a non-positive period", () => {
+    expect(rollingMax([1, 2, 3], 0).every(Number.isNaN)).toBe(true);
+    expect(rollingMin([1, 2, 3], -2).every(Number.isNaN)).toBe(true);
+  });
+});
+
+// ─── williamsR ──────────────────────────────────────────────────
+describe("williamsR", () => {
+  const high = [10, 11, 12];
+  const low = [5, 6, 7]; // HH = 12, LL = 5 over the 3-bar window → range 7
+
+  it("is 0 at the window high and −100 at the window low", () => {
+    expect(williamsR(high, low, [10, 10, 12], 3)[2]).toBeCloseTo(0, 10);
+    expect(williamsR(high, low, [10, 10, 8.5], 3)[2]).toBeCloseTo(-50, 10);
+    expect(williamsR(high, low, [10, 10, 5], 3)[2]).toBeCloseTo(-100, 10);
+  });
+
+  it("keeps the true sign for a close outside its own range", () => {
+    // Adjusted history can put the close above the window high; the reading is
+    // reported as-is rather than clamped to 0.
+    expect(williamsR(high, low, [10, 10, 13], 3)[2]).toBeCloseTo(100 / 7, 10);
+  });
+
+  it("stays NaN through warm-up and on a range-less window", () => {
+    const out = williamsR(high, low, [10, 10, 12], 3);
+    expect(Number.isNaN(out[0])).toBe(true);
+    expect(Number.isNaN(out[1])).toBe(true);
+    expect(Number.isNaN(williamsR([7, 7, 7], [7, 7, 7], [7, 7, 7], 3)[2])).toBe(true);
+  });
+
+  it("stays within −100..0 while the close stays inside its window", () => {
+    const mid = Array.from({ length: 80 }, (_, i) => 100 + Math.sin(i / 3) * 4);
+    const h = mid.map((v) => v + 6);
+    const l = mid.map((v) => v - 6);
+    const c = mid.map((v) => v + 3);
+    for (const v of williamsR(h, l, c, 14)) {
+      if (Number.isNaN(v)) continue;
+      expect(v).toBeGreaterThanOrEqual(-100);
+      expect(v).toBeLessThanOrEqual(0);
+    }
+  });
+});
+
+// ─── stochRsi ───────────────────────────────────────────────────
+describe("stochRsi", () => {
+  const closes = Array.from({ length: 200 }, (_, i) => 50 + Math.sin(i / 5) * 8 + i * 0.05);
+
+  it("waits for a full RSI window, then a full smoothing window", () => {
+    const { q, k, d } = stochRsi(closes, 14, 14, 3, 3);
+    // RSI(14)'s first value, +13 for the 14-bar range window, +2 per 3-bar SMA.
+    expect(q.findIndex(Number.isFinite)).toBe(14 + 14 - 1);
+    expect(k.findIndex(Number.isFinite)).toBe(14 + 14 - 1 + 2);
+    expect(d.findIndex(Number.isFinite)).toBe(14 + 14 - 1 + 4);
+  });
+
+  it("quotes the raw line 0-100 against the trailing RSI range", () => {
+    const { q } = stochRsi(closes, 14, 14, 3, 3);
+    const r = rsi(closes, 14);
+    let checked = 0;
+    for (let i = 27; i < closes.length; i++) {
+      const win = r.slice(i - 13, i + 1);
+      const lo = Math.min(...win);
+      const hi = Math.max(...win);
+      if (!(hi > lo)) continue;
+      expect(q[i]).toBeCloseTo(((r[i] - lo) / (hi - lo)) * 100, 9);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(150);
+  });
+
+  it("smooths with plain 3-bar means of the series below it", () => {
+    const { q, k, d } = stochRsi(closes, 14, 14, 3, 3);
+    const mean3 = (v: number[], i: number): number => {
+      const win = [v[i - 2], v[i - 1], v[i]];
+      return win.every(Number.isFinite) ? (win[0] + win[1] + win[2]) / 3 : NaN;
+    };
+    for (let i = 2; i < closes.length; i++) {
+      const kExpected = mean3(q, i);
+      if (Number.isNaN(kExpected)) expect(Number.isNaN(k[i])).toBe(true);
+      else expect(k[i]).toBeCloseTo(kExpected, 9);
+      const dExpected = mean3(k, i);
+      if (Number.isNaN(dExpected)) expect(Number.isNaN(d[i])).toBe(true);
+      else expect(d[i]).toBeCloseTo(dExpected, 9);
+    }
+  });
+
+  it("never leaves 0-100", () => {
+    const { q, k, d } = stochRsi(closes, 14, 14, 3, 3);
+    for (const series of [q, k, d]) {
+      for (const v of series) {
+        if (Number.isNaN(v)) continue;
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(100);
+      }
+    }
+  });
+
+  it("is all NaN for a non-positive period", () => {
+    const empty = stochRsi(closes, 0, 14, 3, 3);
+    expect(empty.q.every(Number.isNaN)).toBe(true);
+    expect(empty.k.every(Number.isNaN)).toBe(true);
+    expect(empty.d.every(Number.isNaN)).toBe(true);
   });
 });

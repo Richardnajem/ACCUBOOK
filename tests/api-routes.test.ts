@@ -18,6 +18,7 @@ const tradesRoute = await import("../src/app/api/trades/route");
 const importRoute = await import("../src/app/api/import/route");
 const pricesRoute = await import("../src/app/api/import/prices/route");
 const backupRoute = await import("../src/app/api/backup/route");
+const megaIndicatorRoute = await import("../src/app/api/mega-indicator/route");
 const db = await import("../src/lib/db");
 
 /** Route handlers are typed against NextRequest; a plain Request satisfies
@@ -151,7 +152,7 @@ describe("price workbook import (/api/import/prices)", () => {
   // a CI runner — run when present, skip when not (same rule as
   // technical-workbook.test.ts).
 
-  it("parses the real six-sheet workbook", { skip: !hasWorkbook, timeout: 30000 }, async () => {
+  it("parses the real workbook (eight sheets)", { skip: !hasWorkbook, timeout: 30000 }, async () => {
     const buf = fs.readFileSync(WORKBOOK);
     const form = new FormData();
     form.append("file", new File([buf], "tehnival analysis 19926.xlsx"));
@@ -226,5 +227,74 @@ describe("backup / restore (/api/backup)", () => {
       jsonReq("/api/backup", "POST", { action: "restore", name: "../../portfolio.db" }) as never,
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /api/mega-indicator (the payload the dashboard renders)", () => {
+  const SYMBOL = "ZZTA";
+
+  it("computes the indicators added with the new workbook", async () => {
+    // Bars go in through the real price-import route and come back out through
+    // the Mega Indicator route — the same path the page takes. ~3.3 years of
+    // daily bars ending today, because the route asks for 3 years and only
+    // serves a symbol straight from the cache when the history covers that
+    // window and reaches the last completed session. Imported symbols are not
+    // refetched, so this never needs the network.
+    const rows: Array<Record<string, unknown>> = [];
+    const day = 86400_000;
+    let px = 100;
+    for (let i = 1199; i >= 0; i--) {
+      const date = new Date(Date.now() - i * day).toISOString().slice(0, 10);
+      const open = px;
+      const close = Math.max(1, px + Math.sin(i / 23) * 1.1);
+      rows.push({
+        symbol: SYMBOL,
+        date,
+        open,
+        high: Math.max(open, close) + 0.4,
+        low: Math.min(open, close) - 0.4,
+        close,
+        volume: 1_000_000,
+      });
+      px = close;
+    }
+    const commit = await pricesRoute.PUT(jsonReq("/api/import/prices", "PUT", { rows }) as never);
+    expect(commit.ok).toBe(true);
+
+    const res = await megaIndicatorRoute.GET(
+      req(`/api/mega-indicator?ticker=${SYMBOL}`) as never,
+    );
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      score: number;
+      technicalError: string | null;
+      indicators: Array<{
+        id: string; name: string; value: number; score: number;
+        formula: string; description: string;
+      }>;
+    };
+    expect(body.technicalError).toBeNull();
+
+    for (const id of ["ta-williams-r", "ta-stochrsi-k", "ta-stochrsi-d"]) {
+      const ind = body.indicators.find((i) => i.id === id);
+      expect(ind, `${id} is missing from the dashboard payload`).toBeTruthy();
+      expect(Number.isFinite(ind!.value), `${id} value: ${ind!.value}`).toBe(true);
+      // The right-click inspector renders these, so they must be filled in.
+      expect(ind!.description.length, `${id} description`).toBeGreaterThan(10);
+      expect(ind!.formula.length, `${id} formula`).toBeGreaterThan(10);
+      expect(ind!.score).toBeGreaterThanOrEqual(0);
+      expect(ind!.score).toBeLessThanOrEqual(100);
+    }
+
+    const wr = body.indicators.find((i) => i.id === "ta-williams-r")!;
+    expect(wr.value).toBeGreaterThanOrEqual(-100);
+    expect(wr.value).toBeLessThanOrEqual(0);
+    for (const id of ["ta-stochrsi-k", "ta-stochrsi-d"]) {
+      const v = body.indicators.find((i) => i.id === id)!.value;
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(100);
+    }
+    expect(body.score).toBeGreaterThanOrEqual(0);
+    expect(body.score).toBeLessThanOrEqual(100);
   });
 });

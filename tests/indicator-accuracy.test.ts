@@ -21,6 +21,7 @@
 import { describe, it, expect } from "vitest";
 import {
   sma, ema, rsi, macd, bollinger, atr, stochastic, cci, stdev, rollingMax, rollingMin,
+  williamsR, stochRsi,
 } from "../src/lib/ta";
 import {
   ALL_SPECS, TECHNICAL_SPECS, MA_PERIODS, normalizeScore, computeMegaIndicator,
@@ -163,6 +164,51 @@ function refStdev(v: number[], p: number): number[] {
   });
 }
 
+function refWilliamsR(h: number[], l: number[], c: number[], p: number): number[] {
+  return c.map((_, i) => {
+    if (i < p - 1) return NaN;
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - p + 1; j <= i; j++) {
+      if (h[j] > hh) hh = h[j];
+      if (l[j] < ll) ll = l[j];
+    }
+    return hh > ll ? (-100 * (hh - c[i])) / (hh - ll) : NaN;
+  });
+}
+
+// Chande & Kroll's Stochastic RSI, written from the definition: the stochastic
+// formula applied to RSI instead of to price, then smoothed twice.
+function refStochRsi(
+  c: number[],
+  rsiPeriod: number,
+  stochPeriod: number,
+  kSmooth: number,
+  dSmooth: number
+): { raw: number[]; k: number[]; d: number[] } {
+  const r = refRsi(c, rsiPeriod);
+  const raw: number[] = new Array(c.length).fill(NaN);
+  for (let i = stochPeriod - 1; i < c.length; i++) {
+    const win = r.slice(i - stochPeriod + 1, i + 1);
+    if (win.some((v) => !Number.isFinite(v))) continue;
+    const hi = Math.max(...win);
+    const lo = Math.min(...win);
+    if (hi > lo) raw[i] = ((r[i] - lo) / (hi - lo)) * 100;
+  }
+  const mean = (v: number[], i: number, p: number): number => {
+    if (i < p - 1) return NaN;
+    let s = 0;
+    for (let j = i - p + 1; j <= i; j++) {
+      if (!Number.isFinite(v[j])) return NaN;
+      s += v[j];
+    }
+    return s / p;
+  };
+  const k = raw.map((_, i) => mean(raw, i, kSmooth));
+  const d = k.map((_, i) => mean(k, i, dSmooth));
+  return { raw, k, d };
+}
+
 function expectSeriesMatch(app: number[], ref: number[], label: string, digits = 9): void {
   let compared = 0;
   for (let i = 0; i < app.length; i++) {
@@ -262,6 +308,24 @@ describe("indicator formulas match the published definitions", () => {
       expect(mn[i]).toBe(Math.min(...w));
     }
   });
+
+  it("Williams %R (14) — −100 at the window low, 0 at the window high", () => {
+    const app = williamsR(bars.high, bars.low, bars.close, 14);
+    expectSeriesMatch(app, refWilliamsR(bars.high, bars.low, bars.close, 14), "Williams %R");
+    for (const v of app) {
+      if (Number.isNaN(v)) continue;
+      expect(v).toBeGreaterThanOrEqual(-100);
+      expect(v).toBeLessThanOrEqual(0);
+    }
+  });
+
+  it("Stochastic RSI (14,14,3) — raw line, fast %K and fast %D", () => {
+    const app = stochRsi(bars.close, 14, 14, 3, 3);
+    const ref = refStochRsi(bars.close, 14, 14, 3, 3);
+    expectSeriesMatch(app.q, ref.raw, "StochRSI raw");
+    expectSeriesMatch(app.k, ref.k, "StochRSI %K");
+    expectSeriesMatch(app.d, ref.d, "StochRSI %D");
+  });
 });
 
 describe("hand-computed worked examples", () => {
@@ -283,6 +347,19 @@ describe("hand-computed worked examples", () => {
     // HH = 14, LL = 8, close = 12 → 100 × (12 − 8) / (14 − 8)
     expect(st.k[2]).toBeCloseTo((100 * 4) / 6, 10);
     expect(st.d[2]).toBeCloseTo((100 * 4) / 6, 10);
+  });
+
+  it("Williams %R matches an exact worked example", () => {
+    // HH = 12, LL = 5 over the 3-bar window → %R = −100 · (12 − 8.5)/7 = −50.
+    expect(williamsR([10, 11, 12], [5, 6, 7], [9, 9, 8.5], 3)[2]).toBeCloseTo(-50, 10);
+  });
+
+  it("StochRSI matches an exact worked example", () => {
+    // closes 10→11→12→11→12 give RSI(2) = [—, —, 100, 50, 75]; over a 2-bar
+    // range window bar 3 sits at its own low (0) and bar 4 at its high (100).
+    const { q } = stochRsi([10, 11, 12, 11, 12], 2, 2, 1, 1);
+    expect(q[3]).toBeCloseTo(0, 10);
+    expect(q[4]).toBeCloseTo(100, 10);
   });
 
   it("ATR with period 1 equals raw true range", () => {

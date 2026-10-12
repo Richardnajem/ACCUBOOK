@@ -6,13 +6,17 @@
 //   - mega-history (per-indicator scores over time).
 //
 // Look-ahead safety: every indicator below is computed with trailing windows
-// only (SMA/EMA/RSI/MACD/Bollinger/ATR/rolling-max in lib/ta are causal), and
+// only (SMA/EMA/RSI/MACD/Bollinger/ATR/Stochastic/CCI/Williams %R/StochRSI in
+// lib/ta are causal; rolling windows are trailing), and
 // the centered Nadaraya-Watson kernel indicators are deliberately excluded —
 // their centered variant reads future bars. The score at date D therefore uses
 // exclusively data up to D, so it is safe to trade on bar-by-bar.
 
 import { ALL_SPECS, MA_PERIODS, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
-import { sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev } from "./ta";
+import {
+  sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
+  adx, mfi, obv, keltnerPosition, aroon, superTrend,
+} from "./ta";
 import { evaluateCustomSeries, type CustomIndicatorDef } from "./custom-indicators";
 
 /** Minimal OHLCV shape needed (Bar satisfies it; strategies pass zipped arrays). */
@@ -84,6 +88,15 @@ export function computeMegaScoreSeries(
   const hi52 = rollingMax(close, 252);
   const stoch14 = stochastic(high, low, close, 14, 3, 3);
   const cci20 = cci(high, low, close, 20);
+  const wr14 = williamsR(high, low, close, 14);
+  const sr14 = stochRsi(close, 14, 14, 3, 3);
+  const adx14 = adx(high, low, close, 14);
+  const mfi14 = mfi(high, low, close, volume, 14);
+  const obvSeries = obv(close, volume);
+  const obvAvg = sma(obvSeries, 20);
+  const kcPos = keltnerPosition(high, low, close, 20, 10, 2);
+  const aroon25 = aroon(high, low, 25);
+  const stTrend = superTrend(high, low, close, 10, 3);
   const vol3d = stdev(close, 3);
 
   for (let i = 0; i < n; i++) {
@@ -114,6 +127,25 @@ export function computeMegaScoreSeries(
 
     // Commodity Channel Index (20)
     if (Number.isFinite(cci20[i])) put("ta-cci-20")[i] = cci20[i];
+
+    // Williams %R (14) — 0 at the window high, −100 at the window low
+    if (Number.isFinite(wr14[i])) put("ta-williams-r")[i] = wr14[i];
+
+    // Stochastic RSI (14,14,3) — fast %K and %D, 0-100
+    if (Number.isFinite(sr14.k[i])) put("ta-stochrsi-k")[i] = sr14.k[i];
+    if (Number.isFinite(sr14.d[i])) put("ta-stochrsi-d")[i] = sr14.d[i];
+
+    // Catalogue indicators (weight 0 until the user adds them)
+    if (Number.isFinite(adx14.adx[i])) put("ta-adx-14")[i] = adx14.adx[i];
+    if (Number.isFinite(mfi14[i])) put("ta-mfi-14")[i] = mfi14[i];
+    if (Number.isFinite(obvAvg[i]) && Number.isFinite(volAvg[i]) && volAvg[i] > 0) {
+      put("ta-obv-20")[i] = (obvSeries[i] - obvAvg[i]) / volAvg[i];
+    }
+    if (Number.isFinite(kcPos[i])) put("ta-kc-pos")[i] = kcPos[i];
+    if (Number.isFinite(aroon25.osc[i])) put("ta-aroon-osc")[i] = aroon25.osc[i];
+    if (Number.isFinite(stTrend.line[i]) && stTrend.line[i] !== 0) {
+      put("ta-supertrend")[i] = ((px - stTrend.line[i]) / stTrend.line[i]) * 100;
+    }
 
     // 3-day volatility: sample stdev of closes, as % of price
     if (Number.isFinite(vol3d[i]) && px !== 0) put("ta-vol-3d")[i] = (vol3d[i] / px) * 100;
