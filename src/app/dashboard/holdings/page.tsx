@@ -2,8 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { onSearchRequested } from "@/lib/search-bus";
 import { SortableTable, Column } from "@/components/SortableTable";
 import ImportDialog from "@/components/ImportDialog";
+import DetailDrawer, { DetailSection, toneOf } from "@/components/DetailDrawer";
+import SymbolDetail, { SymbolMeta } from "@/components/SymbolDetail";
 import { downloadCSV } from "@/lib/export";
 import type { EnrichedPortfolio } from "@/lib/portfolio";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
@@ -20,6 +23,10 @@ export default function HoldingsPage() {
   const [data, setData] = useState<PortfolioData | null>(null);
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  // Click-to-detail: a symbol drawer, or an explanatory drawer for a metric card.
+  const [detail, setDetail] = useState<SymbolMeta | null>(null);
+  const [metric, setMetric] = useState<{ title: string; subtitle?: string; sections: DetailSection[] } | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/portfolio", { cache: "no-store" })
@@ -33,6 +40,16 @@ export default function HoldingsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Seed the table's search box from a global-search pick.
+  useEffect(() => onSearchRequested(setQuery), []);
+
+  // Refresh after a global import (the header dialog fires this event).
+  useEffect(() => {
+    const onChanged = () => load();
+    window.addEventListener("stockfolio:data-changed", onChanged);
+    return () => window.removeEventListener("stockfolio:data-changed", onChanged);
+  }, [load]);
+
   // Live polling: refresh quotes every 5s (idles when tab hidden)
   useEffect(() => {
     const t = setInterval(() => {
@@ -44,6 +61,22 @@ export default function HoldingsPage() {
   const totals = data?.snapshot.totals;
   const positions = useMemo(() => data?.quoted ?? [], [data]);
   const errorEntries = Object.entries(data?.errors ?? {});
+  const cash = data?.snapshot.cash;
+
+  // Everything the detail drawer needs for one holding.
+  const metaOf = (p: Position): SymbolMeta => ({
+    symbol: p.symbol,
+    name: data?.quotes[p.symbol]?.name ?? null,
+    held: p.shares > 0,
+    shares: p.shares, avgCost: p.avgCost, costBasis: p.costBasis, marketValue: p.marketValue,
+    unrealized: p.unrealized, unrealizedPct: p.unrealizedPct,
+    realized: p.realized, dividends: p.dividends, weightPct: p.weightPct, firstBuyDate: p.firstBuyDate,
+    lastPrice: p.lastPrice, prevClose: p.prevClose, dayChange: p.dayChange, dayChangePct: p.dayChangePct,
+    bid: p.bid, ask: p.ask, bidSize: p.bidSize, askSize: p.askSize, spreadPct: p.spreadPct, bookSource: p.bookSource,
+  });
+
+  const openMetric = (title: string, subtitle: string, sections: DetailSection[]) =>
+    setMetric({ title, subtitle, sections });
 
   const allocation = useMemo(
     () =>
@@ -127,6 +160,7 @@ export default function HoldingsPage() {
     { key: "realized", header: "Realized", align: "right", render: (r) => fmt(r.realized) },
     { key: "dividends", header: "Dividends", align: "right", render: (r) => fmt(r.dividends) },
     { key: "weightPct", header: "Weight", align: "right", render: (r) => `${r.weightPct.toFixed(1)}%` },
+    { key: "details", header: "", sortable: false, align: "right", render: () => <span className="text-[var(--muted)] text-xs whitespace-nowrap">Details ›</span> },
   ];
 
   const fmtSize = (v: number | null | undefined) =>
@@ -141,13 +175,22 @@ export default function HoldingsPage() {
     downloadCSV("holdings.csv", headers, rows);
   };
 
-  const kpi = (label: string, value: string, sub?: string, color?: string) => (
-    <div className="glass rounded-xl p-4">
-      <p className="text-xs text-[var(--muted)] mb-1">{label}</p>
-      <p className={`text-xl font-bold ${color || ""}`}>{value}</p>
-      {sub && <p className="text-xs text-[var(--muted)] mt-1">{sub}</p>}
-    </div>
-  );
+  const kpi = (label: string, value: string, sub?: string, color?: string, onOpen?: () => void) => {
+    const inner = (
+      <>
+        <p className="text-xs text-[var(--muted)] mb-1">{label}</p>
+        <p className={`text-xl font-bold ${color || ""}`}>{value}</p>
+        {sub && <p className="text-xs text-[var(--muted)] mt-1">{sub}</p>}
+      </>
+    );
+    return onOpen ? (
+      <button onClick={onOpen} title={`Details for ${label}`} className="glass rounded-xl p-4 text-left border border-transparent hover:border-indigo-500/40 transition-colors">
+        {inner}
+      </button>
+    ) : (
+      <div className="glass rounded-xl p-4">{inner}</div>
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -167,7 +210,7 @@ export default function HoldingsPage() {
             Export CSV
           </button>
           <button onClick={() => setImportOpen(true)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">
-            Import Trades
+            Import
           </button>
         </div>
       </div>
@@ -186,12 +229,50 @@ export default function HoldingsPage() {
         <>
           {/* KPI row */}
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-            {kpi("Total Equity", fmt(totals?.equity ?? 0))}
-            {kpi("Total Return", fmt(totals?.totalReturn ?? 0), pct(totals?.totalReturnPct ?? 0), (totals?.totalReturn ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]")}
-            {kpi("Day Change", fmt(totals?.dayChange ?? 0), undefined, (totals?.dayChange ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]")}
-            {kpi("Unrealized P&L", fmt(totals?.unrealized ?? 0), undefined, (totals?.unrealized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]")}
-            {kpi("Realized P&L", fmt(totals?.realized ?? 0), undefined, (totals?.realized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]")}
-            {kpi("Cash", fmt(data?.snapshot.cashBalance ?? 0), `Dividends ${fmt(totals?.dividends ?? 0)}`)}
+            {kpi("Total Equity", fmt(totals?.equity ?? 0), undefined, undefined, () =>
+              openMetric("Total Equity", "Market value + cash balance", [
+                { heading: "Composition", rows: [
+                  { label: "Market value", value: fmt(totals?.marketValue ?? 0) },
+                  { label: "Cash balance", value: fmt(data?.snapshot.cashBalance ?? 0) },
+                  { label: "Total equity", value: fmt(totals?.equity ?? 0) },
+                ] },
+              ]))}
+            {kpi("Total Return", fmt(totals?.totalReturn ?? 0), pct(totals?.totalReturnPct ?? 0), (totals?.totalReturn ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
+              openMetric("Total Return", "Equity − net invested", [
+                { heading: "Return", rows: [
+                  { label: "Equity", value: fmt(totals?.equity ?? 0) },
+                  { label: "Invested (deposits − withdrawals)", value: fmt(totals?.invested ?? 0) },
+                  { label: "Total return", value: fmt(totals?.totalReturn ?? 0), tone: toneOf(totals?.totalReturn ?? 0) },
+                  { label: "Return %", value: pct(totals?.totalReturnPct ?? 0), tone: toneOf(totals?.totalReturn ?? 0) },
+                ] },
+              ]))}
+            {kpi("Day Change", fmt(totals?.dayChange ?? 0), undefined, (totals?.dayChange ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
+              openMetric("Day Change", "Each holding's move today, vs yesterday's close", [
+                { heading: "By position", rows: positions.map((p) => ({ label: `${p.symbol} (${pct(p.dayChangePct)})`, value: fmt(p.dayChange), tone: toneOf(p.dayChange) })) },
+                { heading: "Total", rows: [{ label: "Day change", value: fmt(totals?.dayChange ?? 0), tone: toneOf(totals?.dayChange ?? 0) }] },
+              ]))}
+            {kpi("Unrealized P&L", fmt(totals?.unrealized ?? 0), undefined, (totals?.unrealized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
+              openMetric("Unrealized P&L", "Market value − cost basis, per holding", [
+                { heading: "By position", rows: positions.map((p) => ({ label: `${p.symbol} (${pct(p.unrealizedPct)})`, value: fmt(p.unrealized), tone: toneOf(p.unrealized) })) },
+                { heading: "Total", rows: [{ label: "Unrealized", value: fmt(totals?.unrealized ?? 0), tone: toneOf(totals?.unrealized ?? 0) }] },
+              ]))}
+            {kpi("Realized P&L", fmt(totals?.realized ?? 0), undefined, (totals?.realized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
+              openMetric("Realized P&L", "Booked on sells (FIFO), net of fees", [
+                { heading: "By position", rows: data?.snapshot.positions.filter((p) => p.realized !== 0).map((p) => ({ label: p.symbol, value: fmt(p.realized), tone: toneOf(p.realized) })) ?? [] },
+                { heading: "Total", rows: [{ label: "Realized", value: fmt(totals?.realized ?? 0), tone: toneOf(totals?.realized ?? 0) }] },
+              ]))}
+            {kpi("Cash", fmt(data?.snapshot.cashBalance ?? 0), `Dividends ${fmt(totals?.dividends ?? 0)}`, undefined, () =>
+              openMetric("Cash balance", "Deposits − withdrawals + dividends − fees − buys + sells", [
+                { heading: "Cash ledger", rows: [
+                  { label: "Deposits", value: fmt(cash?.deposits ?? 0) },
+                  { label: "Withdrawals", value: fmt(-(cash?.withdrawals ?? 0)) },
+                  { label: "Dividends", value: fmt(cash?.dividends ?? 0) },
+                  { label: "Fees", value: fmt(-(cash?.fees ?? 0)) },
+                  { label: "Buy costs", value: fmt(-(cash?.buyCosts ?? 0)) },
+                  { label: "Sell proceeds", value: fmt(cash?.sellProceeds ?? 0) },
+                  { label: "Cash balance", value: fmt(data?.snapshot.cashBalance ?? 0) },
+                ] },
+              ]))}
           </div>
 
           <PanelBoard
@@ -207,7 +288,14 @@ export default function HoldingsPage() {
                 </p>
               ) : (
                 <div className="overflow-x-auto">
-                  <SortableTable columns={columns} data={positions} searchKey="symbol" searchPlaceholder="Search symbol…" />
+                  <SortableTable
+                    columns={columns}
+                    data={positions}
+                    searchKey="symbol"
+                    searchPlaceholder="Search symbol…"
+                    externalSearch={query}
+                    onRowClick={(r) => setDetail(metaOf(r))}
+                  />
                 </div>
               )}
             </ChartPanel>
@@ -231,11 +319,31 @@ export default function HoldingsPage() {
                   </div>
                   <div className="space-y-1.5 mt-3">
                     {allocation.map((a) => (
-                      <div key={a.name} className="flex items-center gap-2 text-xs">
+                      <button
+                        key={a.name}
+                        onClick={() => {
+                          if (a.name === "Cash") {
+                            openMetric("Cash balance", "Cash ledger", [
+                              { heading: "Cash ledger", rows: [
+                                { label: "Deposits", value: fmt(cash?.deposits ?? 0) },
+                                { label: "Withdrawals", value: fmt(-(cash?.withdrawals ?? 0)) },
+                                { label: "Dividends", value: fmt(cash?.dividends ?? 0) },
+                                { label: "Fees", value: fmt(-(cash?.fees ?? 0)) },
+                                { label: "Cash balance", value: fmt(data?.snapshot.cashBalance ?? 0) },
+                              ] },
+                            ]);
+                            return;
+                          }
+                          const p = positions.find((x) => x.symbol === a.name);
+                          if (p) setDetail(metaOf(p));
+                        }}
+                        className="flex items-center gap-2 text-xs w-full text-left rounded px-1 -mx-1 hover:bg-[var(--card-hover)] transition-colors"
+                        title={`Details for ${a.name}`}
+                      >
                         <span className="w-2.5 h-2.5 rounded-sm" style={{ background: a.color }} />
                         <span className="font-medium">{a.name}</span>
                         <span className="ml-auto text-[var(--muted)]">{fmt(a.value)}</span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </>
@@ -258,7 +366,11 @@ export default function HoldingsPage() {
                   </thead>
                   <tbody>
                     {data.snapshot.closedPositions.map((p) => (
-                      <tr key={p.symbol} className="border-b border-[var(--card-border)] last:border-0">
+                      <tr
+                        key={p.symbol}
+                        onClick={() => setDetail({ symbol: p.symbol, held: false, shares: p.shares, realized: p.realized, dividends: p.dividends, firstBuyDate: p.firstBuyDate })}
+                        className="border-b border-[var(--card-border)] last:border-0 cursor-pointer hover:bg-[var(--table-row-hover)]"
+                      >
                         <td className="py-2.5 font-medium">{p.symbol}</td>
                         <td className={`py-2.5 text-right ${p.realized >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}`}>{fmt(p.realized)}</td>
                         <td className="py-2.5 text-right">{fmt(p.dividends)}</td>
@@ -273,7 +385,17 @@ export default function HoldingsPage() {
         </>
       )}
 
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={load} />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={load} initialTab="positions" />
+
+      {/* Click-to-detail drawers */}
+      <SymbolDetail open={!!detail} meta={detail} onClose={() => setDetail(null)} onChanged={load} />
+      <DetailDrawer
+        open={!!metric}
+        onClose={() => setMetric(null)}
+        title={metric?.title ?? ""}
+        subtitle={metric?.subtitle}
+        sections={metric?.sections}
+      />
     </div>
   );
 }

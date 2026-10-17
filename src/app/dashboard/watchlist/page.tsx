@@ -1,7 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import ImportDialog from "@/components/ImportDialog";
+import SymbolDetail, { SymbolMeta } from "@/components/SymbolDetail";
 import { useUndoRedo } from "@/lib/undo-redo";
+import { onSearchRequested } from "@/lib/search-bus";
 
 const fmt = (n: number | null) =>
   n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
@@ -34,6 +37,9 @@ export default function WatchlistPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editTarget, setEditTarget] = useState("");
   const [editNotes, setEditNotes] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [detail, setDetail] = useState<SymbolMeta | null>(null);
+  const [search, setSearch] = useState("");
   const { push } = useUndoRedo();
 
   const load = useCallback(() => {
@@ -47,6 +53,41 @@ export default function WatchlistPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Refresh after a global import (the header dialog fires this event).
+  useEffect(() => {
+    const onChanged = () => load();
+    window.addEventListener("stockfolio:data-changed", onChanged);
+    return () => window.removeEventListener("stockfolio:data-changed", onChanged);
+  }, [load]);
+
+  // Seed the search box from a global-search pick.
+  useEffect(() => onSearchRequested(setSearch), []);
+
+  const metaOf = (row: WatchRow): SymbolMeta => ({
+    symbol: row.symbol,
+    name: row.quote?.name ?? null,
+    watched: true,
+    lastPrice: row.quote?.price ?? null,
+    prevClose: row.quote?.previousClose ?? null,
+    dayChange: row.quote?.change ?? undefined,
+    dayChangePct: row.quote?.changePercent ?? undefined,
+    marketState: row.quote?.marketState ?? null,
+    targetPrice: row.target_price,
+    distanceToTargetPct: row.distanceToTargetPct,
+    notes: row.notes,
+  });
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.symbol.toLowerCase().includes(q) ||
+        (r.notes ?? "").toLowerCase().includes(q) ||
+        (r.quote?.name ?? "").toLowerCase().includes(q),
+    );
+  }, [rows, search]);
 
   // Refresh quotes every 5s (server quote cache is 3s TTL, so every poll sees
   // a fresh quote without hammering Yahoo)
@@ -112,9 +153,25 @@ export default function WatchlistPage() {
           <h2 className="text-2xl font-bold">Watchlist</h2>
           <p className="text-sm text-[var(--muted)]">Track ideas with live quotes and target prices</p>
         </div>
-        <button onClick={() => setAdding(!adding)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">
-          {adding ? "Close" : "+ Add Symbol"}
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search symbol, notes…"
+              className="w-48 pl-9 pr-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+            />
+          </div>
+          <button onClick={() => setImportOpen(true)} className="px-4 py-2 text-sm font-medium rounded-lg border border-indigo-500/50 text-indigo-500 dark:text-indigo-400 hover:bg-indigo-500/10">
+            Import
+          </button>
+          <button onClick={() => setAdding(!adding)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg">
+            {adding ? "Close" : "+ Add Symbol"}
+          </button>
+        </div>
       </div>
 
       {adding && (
@@ -156,19 +213,26 @@ export default function WatchlistPage() {
           <div className="flex items-center justify-center py-16 md:col-span-2 xl:col-span-3">
             <div className="animate-spin w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full" />
           </div>
-        ) : rows.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <p className="text-sm text-[var(--muted)] text-center py-16 md:col-span-2 xl:col-span-3">
-            Watchlist is empty. Add symbols you want to track for entry points.
+            {rows.length === 0
+              ? "Watchlist is empty. Add symbols you want to track for entry points."
+              : `No symbols match “${search}”.`}
           </p>
         ) : (
-          rows.map((row) => {
+          filtered.map((row) => {
             const q = row.quote;
             const up = (q?.change ?? 0) >= 0;
             const nearTarget =
               row.distanceToTargetPct != null &&
               Math.abs(row.distanceToTargetPct) <= 5;
             return (
-              <div key={row.id} className="glass rounded-xl p-4 relative group">
+              <div
+                key={row.id}
+                onClick={() => setDetail(metaOf(row))}
+                title={`Details for ${row.symbol}`}
+                className="glass rounded-xl p-4 relative group cursor-pointer hover:border-indigo-500/40 border border-transparent transition-colors"
+              >
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-2">
@@ -181,14 +245,14 @@ export default function WatchlistPage() {
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
-                      onClick={() => openEdit(row)}
+                      onClick={(e) => { e.stopPropagation(); openEdit(row); }}
                       className="p-1.5 text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] rounded"
                       title="Edit"
                     >
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                     </button>
                     <button
-                      onClick={() => remove(row)}
+                      onClick={(e) => { e.stopPropagation(); remove(row); }}
                       className="p-1.5 text-[var(--muted)] hover:text-red-500 hover:bg-red-500/10 rounded"
                       title="Remove"
                     >
@@ -229,7 +293,7 @@ export default function WatchlistPage() {
                 )}
 
                 {editingId === row.id && (
-                  <div className="mt-3 pt-3 border-t border-[var(--card-border)] space-y-2">
+                  <div className="mt-3 pt-3 border-t border-[var(--card-border)] space-y-2" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="number" step="any" min="0" placeholder="Target price"
                       value={editTarget}
@@ -252,6 +316,11 @@ export default function WatchlistPage() {
           })
         )}
       </div>
+
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={load} initialTab="watchlist" />
+
+      {/* Click a watchlist card for its full quote + history */}
+      <SymbolDetail open={!!detail} meta={detail} onClose={() => setDetail(null)} onChanged={load} />
     </div>
   );
 }

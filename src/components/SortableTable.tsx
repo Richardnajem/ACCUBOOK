@@ -32,6 +32,8 @@ interface SortableTableProps<T> {
   className?: string;
   onRowClick?: (row: T) => void;
   rowKey?: (row: T, index: number) => string | number;
+  /** Seed/override the search box from outside (e.g. a ?q= URL param). */
+  externalSearch?: string;
 }
 
 export function SortableTable<T extends object>({
@@ -44,10 +46,20 @@ export function SortableTable<T extends object>({
   className = "",
   onRowClick,
   rowKey,
+  externalSearch,
 }: SortableTableProps<T>) {
   const [sort, setSort] = useState<SortConfig | null>(null);
   const [filters, setFilters] = useState<FilterConfig>({});
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(externalSearch ?? "");
+
+  // Keep the search box in step with an outside query (global search). This is
+  // the React "adjust state when a prop changes" pattern: it happens during
+  // render, so no extra commit or effect round-trip is needed.
+  const [lastExternal, setLastExternal] = useState(externalSearch);
+  if (externalSearch !== lastExternal) {
+    setLastExternal(externalSearch);
+    setSearch(externalSearch ?? "");
+  }
 
   const handleSort = (key: string) => {
     setSort((prev) => {

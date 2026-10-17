@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { SortableTable, Column } from "@/components/SortableTable";
+import DetailDrawer from "@/components/DetailDrawer";
+import { onSearchRequested } from "@/lib/search-bus";
 import ImportDialog from "@/components/ImportDialog";
 import { useUndoRedo } from "@/lib/undo-redo";
 import { downloadCSV } from "@/lib/export";
@@ -58,7 +60,9 @@ export default function TradesPage() {
   const [error, setError] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Trade | null>(null);
+  const [detailTrade, setDetailTrade] = useState<Trade | null>(null);
   const { push } = useUndoRedo();
+  const [query, setQuery] = useState("");
 
   const load = useCallback(() => {
     fetch("/api/trades", { cache: "no-store" })
@@ -71,6 +75,16 @@ export default function TradesPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Seed the table's search box from a global-search pick.
+  useEffect(() => onSearchRequested(setQuery), []);
+
+  // Refresh after a global import (the header dialog fires this event).
+  useEffect(() => {
+    const onChanged = () => load();
+    window.addEventListener("stockfolio:data-changed", onChanged);
+    return () => window.removeEventListener("stockfolio:data-changed", onChanged);
+  }, [load]);
 
   const typeDef = TYPE_OPTIONS.find((t) => t.value === form.type) ?? TYPE_OPTIONS[0];
   const needsSymbol = typeDef.needsSymbol;
@@ -269,6 +283,8 @@ export default function TradesPage() {
             data={rows}
             searchKey="symbol"
             searchPlaceholder="Search symbol, notes…"
+            externalSearch={query}
+            onRowClick={(r) => setDetailTrade(r)}
             emptyMessage="No trades recorded yet — add one or import from your broker."
           />
         )}
@@ -387,6 +403,31 @@ export default function TradesPage() {
       )}
 
       <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={load} />
+
+      {/* Click a trade row for its full detail */}
+      <DetailDrawer
+        open={!!detailTrade}
+        onClose={() => setDetailTrade(null)}
+        title={detailTrade ? `${detailTrade.type} ${detailTrade.symbol ?? ""}`.trim() : ""}
+        subtitle={detailTrade?.date}
+        sections={detailTrade ? [
+          { heading: "Trade", rows: [
+            { label: "Date", value: detailTrade.date },
+            { label: "Type", value: <span className="capitalize">{detailTrade.type}</span> },
+            { label: "Symbol", value: detailTrade.symbol ?? "—" },
+            { label: "Shares", value: detailTrade.shares != null ? detailTrade.shares.toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—" },
+            { label: "Price / Amount", value: fmt(detailTrade.price ?? 0) },
+            { label: "Fees", value: detailTrade.fees ? fmt(detailTrade.fees) : "—" },
+            { label: "Value", value: fmt(detailTrade.shares != null && detailTrade.price != null ? detailTrade.shares * detailTrade.price : detailTrade.price ?? 0) },
+            { label: "Notes", value: detailTrade.notes ?? "—" },
+            { label: "Recorded", value: detailTrade.created_at, tone: "muted" as const },
+          ] },
+        ] : []}
+        actions={detailTrade ? [
+          { label: "Delete", onClick: () => { setConfirmDelete(detailTrade); setDetailTrade(null); } },
+          { label: "Edit trade", variant: "primary" as const, onClick: () => { openEdit(detailTrade); setDetailTrade(null); } },
+        ] : []}
+      />
     </div>
   );
 }

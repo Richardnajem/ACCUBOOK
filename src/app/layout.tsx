@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { ErrorLoggerInit } from "@/components/ErrorLoggerInit";
 import { UndoRedoProvider } from "@/lib/undo-redo";
 import "./globals.css";
 
@@ -40,6 +41,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground transition-colors">
+        <ErrorLoggerInit />
         <ThemeProvider><UndoRedoProvider>{children}</UndoRedoProvider></ThemeProvider>
       </body>
     </html>

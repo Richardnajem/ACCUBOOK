@@ -3,7 +3,9 @@
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { useTheme } from "@/components/ThemeProvider";
+import ImportDialog from "@/components/ImportDialog";
 import { useUndoRedo } from "@/lib/undo-redo";
+import { dispatchSearch } from "@/lib/search-bus";
 import { useState, useRef, useEffect } from "react";
 
 const navItems = [
@@ -16,6 +18,25 @@ const navItems = [
   { label: "Settings", href: "/dashboard/settings", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg> },
 ];
 
+interface SymbolHit {
+  symbol: string;
+  holdings: boolean;
+  watchlist: boolean;
+  trades: boolean;
+}
+
+// A symbol the user holds is most useful on Holdings; otherwise prefer the
+// Watchlist, then the Trade Log. The pick is handed to the page's search box
+// through lib/search-bus rather than a URL query.
+const symbolHref = (h: SymbolHit): string => {
+  if (h.holdings) return "/dashboard/holdings";
+  if (h.watchlist) return "/dashboard/watchlist";
+  return "/dashboard/trades";
+};
+
+const symbolSources = (h: SymbolHit): string =>
+  [h.holdings && "held", h.watchlist && "watched", h.trades && "traded"].filter(Boolean).join(" · ");
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { theme, setTheme, themes } = useTheme();
@@ -23,6 +44,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [navOpen, setNavOpen] = useState(false); // drawer below lg
   const [cmdOpen, setCmdOpen] = useState(false);
   const [cmdQuery, setCmdQuery] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [symbols, setSymbols] = useState<SymbolHit[]>([]);
   const themeRef = useRef<HTMLDivElement>(null);
   const cmdInputRef = useRef<HTMLInputElement>(null);
 
@@ -67,6 +90,31 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (cmdOpen) setTimeout(() => cmdInputRef.current?.focus(), 50);
+  }, [cmdOpen]);
+
+  // Load every symbol the user touches (held / traded / watched) when the
+  // search palette opens, so one query covers the whole portfolio.
+  useEffect(() => {
+    if (!cmdOpen) return;
+    let cancelled = false;
+    Promise.all([
+      fetch("/api/portfolio", { cache: "no-store" }).then((r) => r.json()).catch(() => ({})),
+      fetch("/api/trades", { cache: "no-store" }).then((r) => r.json()).catch(() => ({})),
+      fetch("/api/watchlist", { cache: "no-store" }).then((r) => r.json()).catch(() => ({})),
+    ]).then(([pf, tr, wl]) => {
+      if (cancelled) return;
+      const map = new Map<string, SymbolHit>();
+      const get = (s: string) => {
+        const k = s.toUpperCase();
+        if (!map.has(k)) map.set(k, { symbol: k, holdings: false, watchlist: false, trades: false });
+        return map.get(k)!;
+      };
+      for (const p of (pf?.quoted ?? []) as { symbol: string }[]) get(p.symbol).holdings = true;
+      for (const t of (tr?.trades ?? []) as { symbol: string | null }[]) if (t.symbol) get(t.symbol).trades = true;
+      for (const w of (wl?.items ?? []) as { symbol: string }[]) if (w.symbol) get(w.symbol).watchlist = true;
+      setSymbols([...map.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)));
+    });
+    return () => { cancelled = true; };
   }, [cmdOpen]);
 
   useEffect(() => {
@@ -120,6 +168,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </div>
     </>
   );
+
+  const normalizedQuery = cmdQuery.trim().toLowerCase();
+  const filteredNav = navItems.filter(
+    (item) =>
+      !normalizedQuery ||
+      item.label.toLowerCase().includes(normalizedQuery) ||
+      item.href.toLowerCase().includes(normalizedQuery),
+  );
+  const filteredSymbols = normalizedQuery
+    ? symbols.filter((s) => s.symbol.toLowerCase().includes(normalizedQuery))
+    : symbols;
 
   return (
     <div className="min-h-screen flex">
@@ -204,11 +263,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </button>
             </div>
 
-            {/* Cmd+K trigger */}
+            {/* Global search (symbols + pages) */}
             <button onClick={() => { setCmdOpen(true); setCmdQuery(""); }}
-              className="flex items-center gap-1.5 px-2 py-1 text-xs text-[var(--muted)] hover:text-[var(--foreground)] rounded-lg hover:bg-[var(--card-hover)] border border-[var(--card-border)] transition-colors">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-              <span className="hidden sm:inline">⌘K</span>
+              title="Search symbols and pages (⌘K)"
+              className="flex items-center gap-2 pl-2.5 pr-2 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] rounded-lg hover:bg-[var(--card-hover)] border border-[var(--card-border)] transition-colors">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+              <span className="hidden md:inline">Search symbols…</span>
+              <kbd className="hidden md:inline text-[10px] text-[var(--muted)] bg-[var(--input-bg)] px-1.5 py-0.5 rounded border border-[var(--input-border)]">⌘K</kbd>
+            </button>
+
+            {/* Global import — available on every tab */}
+            <button onClick={() => setImportOpen(true)}
+              title="Import trades, positions, a watchlist, or price history"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-indigo-500/50 text-indigo-500 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" /></svg>
+              <span className="hidden sm:inline">Import</span>
             </button>
 
             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" title="System Active" />
@@ -233,12 +302,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <kbd className="text-[10px] text-[var(--muted)] bg-[var(--input-bg)] px-1.5 py-0.5 rounded border border-[var(--input-border)]">ESC</kbd>
             </div>
             <div className="max-h-64 overflow-y-auto py-1">
-              {navItems
-                .filter(item => {
-                  if (!cmdQuery) return true;
-                  const q = cmdQuery.toLowerCase();
-                  return item.label.toLowerCase().includes(q) || item.href.toLowerCase().includes(q);
-                })
+              {filteredNav
                 .map(item => {
                   const isActive = pathname === item.href;
                   return (
@@ -255,17 +319,33 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     </Link>
                   );
                 })}
-              {navItems.filter(item => {
-                if (!cmdQuery) return true;
-                const q = cmdQuery.toLowerCase();
-                return item.label.toLowerCase().includes(q) || item.href.toLowerCase().includes(q);
-              }).length === 0 && (
-                <p className="text-sm text-[var(--muted)] text-center py-8">No matching pages</p>
+              {filteredSymbols.length > 0 && (
+                <>
+                  <p className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--muted)]">Symbols</p>
+                  {filteredSymbols.slice(0, 30).map((h) => (
+                    <Link key={h.symbol} href={symbolHref(h)}
+                      onClick={() => { dispatchSearch(h.symbol); setCmdOpen(false); }}
+                      className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] transition-colors">
+                      <span className="font-bold text-[var(--foreground)] w-16">{h.symbol}</span>
+                      <span className="text-[11px] text-[var(--muted)]">{symbolSources(h)}</span>
+                      <span className="ml-auto text-[10px] text-[var(--muted)]">open →</span>
+                    </Link>
+                  ))}
+                </>
+              )}
+              {filteredNav.length === 0 && filteredSymbols.length === 0 && (
+                <p className="text-sm text-[var(--muted)] text-center py-8">No matching symbols or pages</p>
               )}
             </div>
           </div>
         </div>
       )}
+
+      <ImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => { if (typeof window !== "undefined") window.dispatchEvent(new Event("stockfolio:data-changed")); }}
+      />
     </div>
   );
 }

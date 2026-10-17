@@ -31,6 +31,8 @@ import {
   type CustomIndicatorDef,
 } from "@/lib/custom-indicators";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
+import IndicatorPicker from "@/components/IndicatorPicker";
+import DetailDrawer from "@/components/DetailDrawer";
 import type { Suggestion } from "@/lib/indicator-suggestions";
 
 interface MegaIndicator {
@@ -619,10 +621,20 @@ export default function MegaIndicatorPage() {
     [data, overrides]
   );
 
-  const [suggestionsHidden, setSuggestionsHidden] = useState(false);
   const suggestions = data?.suggestions ?? [];
+  // The picker opens from "Add Indicator": a searchable list of what can be added.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // Click ⓘ on an indicator row for its full spec.
+  const [indDetail, setIndDetail] = useState<MegaIndicator | null>(null);
   const inCompositeCount = data
     ? data.indicators.filter((i) => effectiveWeight(i, weights) > 0).length
+    : 0;
+  // Badge count: suggestions that are actually addable right now (a "boost"
+  // suggestion for an indicator already in the composite is not an add).
+  const suggestionsAvailable = data
+    ? data.indicators.filter(
+        (i) => suggestions.some((s) => s.id === i.id) && effectiveWeight(i, weights) <= 0,
+      ).length
     : 0;
 
   const grouped = useMemo(() => {
@@ -1088,58 +1100,6 @@ export default function MegaIndicatorPage() {
             </ResponsiveContainer>
           </ChartPanel>
 
-          {/* ─── Suggested for this ticker ─────────────────────── */}
-          {suggestions.length > 0 && !suggestionsHidden && (
-            <ChartPanel
-              id="suggestions"
-              title="Suggested for this ticker"
-              right={
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-[var(--muted)]">
-                    From this market state, not from a preset
-                  </span>
-                  <button
-                    onClick={() => setSuggestionsHidden(true)}
-                    title="Hide these suggestions until you analyse again"
-                    className="text-xs px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
-                  >
-                    Hide
-                  </button>
-                </div>
-              }
-            >
-              <div className="space-y-2">
-                {suggestions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex flex-wrap items-start gap-3 rounded-lg border border-[var(--card-border)] bg-[var(--card-hover)]/40 px-3 py-2.5"
-                  >
-                    <span
-                      className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        s.kind === "add" ? "bg-emerald-500/15 text-emerald-300" : "bg-indigo-500/15 text-indigo-300"
-                      }`}
-                    >
-                      {s.kind === "add" ? "ADD" : "BOOST"}
-                    </span>
-                    <div className="min-w-0 flex-1 basis-64">
-                      <div className="text-sm font-medium flex items-center gap-2">
-                        {s.name}
-                        <span className="text-[10px] text-[var(--muted)]">weight {s.weight}</span>
-                      </div>
-                      <p className="text-[11px] text-[var(--muted)]">{s.reason}</p>
-                    </div>
-                    <button
-                      onClick={() => setWeight(s.id, s.weight)}
-                      title={`Set ${s.name} to weight ${s.weight}`}
-                      className="text-xs px-2.5 py-1.5 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 font-medium"
-                    >
-                      {s.kind === "add" ? "Add to composite" : `Set weight ${s.weight}`}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </ChartPanel>
-          )}
           {/* ─── Weight sliders grouped by category ────────────── */}
           <ChartPanel
             id="weights"
@@ -1147,11 +1107,11 @@ export default function MegaIndicatorPage() {
             right={
               <div className="flex items-center gap-3 flex-wrap">
                 <button
-                  onClick={startNewIndicator}
-                  title="Define your own indicator from a formula over OHLCV"
-                  className="text-xs px-2.5 py-1.5 rounded border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 font-medium"
+                  onClick={() => setPickerOpen(true)}
+                  title="Search the catalogue and add indicators to the composite"
+                  className="text-xs px-2.5 py-1.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 font-medium"
                 >
-                  ＋ Add Indicator
+                  ＋ Add Indicator{suggestionsAvailable > 0 ? ` (${suggestionsAvailable})` : ""}
                 </button>
                 <input
                   value={search}
@@ -1215,6 +1175,14 @@ export default function MegaIndicatorPage() {
                                 <div className="min-w-0 flex-1 basis-56">
                                   <div className="flex items-center gap-2">
                                     <span className="text-sm font-medium truncate">{ind.name}</span>
+                                    <button
+                                      onClick={() => setIndDetail(ind)}
+                                      title={`Details for ${ind.name}`}
+                                      aria-label={`Details for ${ind.name}`}
+                                      className="p-0.5 rounded text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] shrink-0"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    </button>
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-hover)] text-[var(--muted)]">
                                       {ind.category === "Custom" ? "MY" : ind.category === "Moving Averages" ? "MA" : "TA"}
                                     </span>
@@ -1334,6 +1302,49 @@ export default function MegaIndicatorPage() {
           </ChartPanel>
         </PanelBoard>
       )}
+
+      {/* ─── Indicator detail (ⓘ on a row) ───────────────────────── */}
+      <DetailDrawer
+        open={!!indDetail}
+        onClose={() => setIndDetail(null)}
+        title={indDetail?.name ?? ""}
+        subtitle={indDetail ? `${indDetail.category} · ${ticker || "no ticker"}` : undefined}
+        badges={indDetail ? (
+          <>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-hover)] text-[var(--muted)]">{indDetail.direction === "higher" ? "HIGHER = BETTER" : indDetail.direction === "lower" ? "LOWER = BETTER" : "BAND"}</span>
+            {indDetail.optional && <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-500 dark:text-indigo-400">CATALOGUE</span>}
+            {indDetail.enabled ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-[var(--success)]">IN COMPOSITE</span> : <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-hover)] text-[var(--muted)]">NOT IN COMPOSITE</span>}
+          </>
+        ) : undefined}
+        sections={indDetail ? [
+          { heading: "Reading", rows: [
+            { label: "Value", value: `${indDetail.unit === "$" ? "$" : ""}${indDetail.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${indDetail.unit && indDetail.unit !== "$" ? ` ${indDetail.unit}` : ""}` },
+            { label: "Score", value: indDetail.score.toFixed(1), tone: indDetail.score >= 60 ? "pos" as const : indDetail.score < 40 ? "neg" as const : undefined },
+            { label: "Weight", value: effectiveWeight(indDetail, weights).toFixed(1) },
+            { label: "Thresholds", value: `${indDetail.thresholds[0]} / ${indDetail.thresholds[1]}`, tone: "muted" as const },
+            { label: "Scoring rule", value: formulaLabel(mergeFormula({ direction: indDetail.direction, thresholds: indDetail.thresholds }, overrides[indDetail.id])), tone: "muted" as const },
+            { label: "Contribution", value: ((view?.contributions ?? []).find((c) => c.id === indDetail.id)?.contribution ?? 0).toFixed(2) },
+          ] },
+          { heading: "What it measures", body: <p className="text-xs text-[var(--muted)] leading-relaxed">{indDetail.description}</p> },
+          { heading: "Formula", body: (
+            <code className="block text-[11px] font-mono p-3 rounded-lg border border-[var(--card-border)] bg-[var(--input-bg)] whitespace-pre-wrap break-words">
+              {indDetail.formula}
+            </code>
+          ) },
+        ] : []}
+      />
+
+      {/* ─── Searchable indicator picker ("Add Indicator") ──────── */}
+      <IndicatorPicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        indicators={data?.indicators ?? []}
+        weights={weights}
+        suggestions={suggestions}
+        ticker={ticker}
+        onAdd={(id, w) => setWeight(id, w)}
+        onCreateCustom={() => { setPickerOpen(false); startNewIndicator(); }}
+      />
 
       {/* ─── Add / edit a user-defined indicator ────────────────── */}
       {editorOpen && draft && (
