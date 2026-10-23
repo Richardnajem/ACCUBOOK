@@ -19,7 +19,10 @@
     "electron": "electron .",
     "pack": "npm run build && node scripts/depsymlinks.cjs && electron-builder --dir",
     "dist": "npm run build && node scripts/depsymlinks.cjs && electron-builder",
-    "release": "npm run build && node scripts/depsymlinks.cjs && electron-builder --publish always"
+    "release": "npm run build && node scripts/depsymlinks.cjs && electron-builder --publish always",
+    "release:patch": "node scripts/cut-release.mjs patch",
+    "release:minor": "node scripts/cut-release.mjs minor",
+    "release:major": "node scripts/cut-release.mjs major"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

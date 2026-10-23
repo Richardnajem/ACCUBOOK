@@ -74,11 +74,28 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 ```bash
 npm install
 npm run dev            # web dev server
-npm test               # vitest (200 tests)
+npm test               # vitest (340+ tests)
 npm run build          # next build
 npm run dev:electron   # Next + Electron together
 npm run build:electron # packaged desktop app
+npm run release:patch  # bump + commit + tag + push → Release workflow publishes
 ```
+
+## Cutting a numbered release
+
+`npm run release:patch` (or `release:minor` / `release:major`) runs
+`scripts/cut-release.mjs`: it refuses a dirty tree, a branch other than `master`,
+commits missing from origin, or an existing tag; runs lint + typecheck + tests;
+bumps `package.json` and `package-lock.json`; commits `Release X`; tags `vX`;
+pushes branch and tag; then watches the CI and Release runs. `-- --dry-run`
+prints the computed number and changes nothing. Never hand-edit the version for a
+release — the tag is what triggers `.github/workflows/release.yml`.
+
+A GitHub-hosted "cut release" button would need a new workflow file, and pushing
+one requires the `workflow` token scope; the current `gh` login has only
+`gist`, `read:org` and `repo`. Grant it once with
+`gh auth refresh -h github.com -s workflow` if the numbering step should move
+into Actions.
 
 ## Error logging
 

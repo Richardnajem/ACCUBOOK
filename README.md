@@ -165,12 +165,16 @@ migrate on the fly.
 **Packaged app (auto-update):** the Electron shell ships `electron-updater` wired to
 GitHub Releases, and releases come from the tag-driven workflow:
 
-**Releasing a new version:** bump `version` in `package.json`, commit, then push
-a matching tag — `git tag v2.4.1 && git push origin v2.4.1`. The `Release`
-workflow builds the installers on a Windows runner and publishes them itself: the
-Setup `.exe`, the portable `.exe`, their blockmaps and `latest.yml`. It fails
-rather than shipping a release whose `latest.yml` is missing, because that is the
-file every install reads to see whether an update exists.
+**Releasing a new version:** one command — `npm run release:patch` (or
+`release:minor` / `release:major`). `scripts/cut-release.mjs` refuses a dirty or
+out-of-sync tree, runs lint + typecheck + tests, bumps `package.json` and
+`package-lock.json`, commits `Release X`, tags `vX`, pushes both, and waits for
+the workflows. Add `-- --dry-run` to see the next number without changing
+anything. The `Release` workflow then builds the installers on a Windows runner
+and publishes them itself: the Setup `.exe`, the portable `.exe`, their
+blockmaps and `latest.yml`. It fails rather than shipping a release whose
+`latest.yml` is missing, because that is the file every install reads to see
+whether an update exists.
 
 Installed apps then check GitHub on every launch and offer whatever the newest
 release holds. Offline, the whole check silently no-ops.
