@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDailyBars } from "@/lib/market-data";
 import {
   sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
-  adx, mfi, obv, keltnerPosition, aroon, superTrend,
+  adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
+  donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
+  balanceOfPower, cmo, percentSlope,
 } from "@/lib/ta";
 import { ALL_SPECS, MA_PERIODS, computeMegaIndicator, defaultWeights, WeightMap } from "@/lib/mega-indicator";
 import { suggestIndicators, median, type SuggestionContext } from "@/lib/indicator-suggestions";
@@ -37,6 +39,7 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
     if (bars.length < 30) return { ...empty, ticker, error: `Not enough price history for ${ticker} (${bars.length} bars).` };
 
     const close = bars.map((b) => b.close);
+    const open = bars.map((b) => b.open);
     const high = bars.map((b) => b.high);
     const low = bars.map((b) => b.low);
     const volume = bars.map((b) => b.volume);
@@ -181,6 +184,53 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         : NaN;
     const stLinePct = Number.isFinite(stLine) && stLine !== 0 ? ((px - stLine) / stLine) * 100 : NaN;
 
+    // ─── Workbook 181026 additions ──────────────────────────────
+    // Donchian channel position (0 = window low, 100 = window high).
+    const donchian20 = donchianPosition(high, low, close, 20);
+    // Fibonacci range position over the same 52-week window the app already
+    // uses for "distance from the 52-week high".
+    const fibWindow = Math.min(252, close.length);
+    const fibPos = rangePosition(high, low, close, fibWindow);
+    // A/D line against its own 20-bar average — days of average volume.
+    const adlSeries = adl(high, low, close, volume);
+    const adlAvg = sma(adlSeries, 20);
+    const adlDays =
+      Number.isFinite(adlAvg[last]) && Number.isFinite(volAvg[last]) && volAvg[last] > 0
+        ? (adlSeries[last] - adlAvg[last]) / volAvg[last]
+        : NaN;
+    // +DI − −DI: ADX's direction.
+    const diSpread =
+      Number.isFinite(adx14.plusDi[last]) && Number.isFinite(adx14.minusDi[last])
+        ? adx14.plusDi[last] - adx14.minusDi[last]
+        : NaN;
+    // Smoothed Balance of Power (14), and the Chaikin money-flow pair.
+    const bop14 = windowMean(balanceOfPower(open, high, low, close), 14);
+    const cmf20 = chaikinMoneyFlow(high, low, close, volume, 20);
+    const chaikinOsc = chaikinOscillator(high, low, close, volume, 3, 10);
+    const chaikinOscDays =
+      Number.isFinite(chaikinOsc[last]) && Number.isFinite(volAvg[last]) && volAvg[last] > 0
+        ? chaikinOsc[last] / volAvg[last]
+        : NaN;
+    // Chande momentum and the two workbook EMA slopes.
+    const cmo14 = cmo(close, 14);
+    const ema20 = ema(close, 20);
+    const ema200 = ema(close, 200);
+    const ema20Slope = percentSlope(ema20, close);
+    const ema200Slope = percentSlope(ema200, close);
+    // CTM: the workbook's mean of RSI, CMO, EMA-20, EMA-200 and ADX. The
+    // workbook averages the EMA *price levels* in raw, which makes CTM drift
+    // with the share price (always >60 for an expensive stock). Convert the two
+    // EMA legs to the same 0-100 price-vs-EMA readings used by ta-ema-* first,
+    // so CTM is a comparable 0-100 signal.
+    const pctToEmaScore = (pct: number): number =>
+      Number.isFinite(pct) ? Math.max(0, Math.min(100, ((pct + 1) / 2) * 100)) : NaN;
+    const ema20Dist = Number.isFinite(ema20[last]) && ema20[last] !== 0 ? ((px - ema20[last]) / ema20[last]) * 100 : NaN;
+    const ema200Dist = Number.isFinite(ema200[last]) && ema200[last] !== 0 ? ((px - ema200[last]) / ema200[last]) * 100 : NaN;
+    const ctmParts = [rsiVal, cmo14[last], pctToEmaScore(ema20Dist), pctToEmaScore(ema200Dist), adx14.adx[last]];
+    const ctm = ctmParts.every(Number.isFinite)
+      ? ctmParts.reduce((s, v) => s + v, 0) / ctmParts.length
+      : NaN;
+
     // Volatility regime: today's ATR% against its own median over the last year.
     const atrPctHistory: number[] = [];
     for (let i = Math.max(0, last - 249); i <= last; i++) {
@@ -223,6 +273,17 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         "ta-mfi-14": mfi14[last],
         "ta-obv-20": obvDiv,
         "ta-kc-pos": kcPos[last],
+        "ta-donchian-pos": donchian20[last],
+        "ta-fib-pos": fibPos[last],
+        "ta-adl-20": adlDays,
+        "ta-di-spread": diSpread,
+        "ta-bop-14": bop14[last],
+        "ta-cmf-20": cmf20[last],
+        "ta-chaikin-osc": chaikinOscDays,
+        "ta-cmo-14": cmo14[last],
+        "ta-ema20-slope": ema20Slope[last],
+        "ta-ema200-slope": ema200Slope[last],
+        "ta-ctm": ctm,
         "ta-vol-3d": vol3d,
         "ta-mom-63": mom,
         "ta-vol-ratio": volRatio,

@@ -31,6 +31,25 @@ leaves your machine.
 - **Indicators engine** — SMA, EMA, RSI, MACD, Bollinger Bands, ATR and more
   (`src/lib/ta.ts`).
 
+### Company Research
+- **SEC fundamentals** — search any SEC filer by ticker or CIK: company profile,
+  five annual income-statement, balance-sheet and cash-flow statements read from
+  **filed XBRL facts** (10-K / 20-F / 40-F), with the exact concept behind each line.
+- **Ratios & growth** — margins, ROE/ROA, debt/equity, current ratio, FCF margin and
+  year-over-year revenue/EPS/FCF growth, computed from the filed statements.
+- **Valuation** — market cap, enterprise value, P/E, P/S, P/B, EV/EBITDA, earnings,
+  FCF and dividend yield against the live quote. Multiples use the latest **filed**
+  fiscal year (not invented TTM numbers).
+- **Foreign filers** — IFRS reporters (e.g. 20-F in DKK/EUR) keep their own currency;
+  a real USD FX rate converts price and net debt so the multiples are comparable.
+- **Filings** — recent 10-K/10-Q/8-K/20-F/40-F/6-K with direct SEC EDGAR links.
+- **Honest coverage** — anything the filer did not report is shown as “—” and named
+  in the coverage notes; analyst estimates and ratings are not in the SEC dataset and
+  are not fabricated.
+
+  Set `SEC_USER_AGENT` to a string with your contact address (SEC's fair-access
+  policy) before using this in production.
+
 ### Backtesting
 - **Famous strategies** — SMA/EMA crossovers, RSI mean reversion, MACD, Bollinger,
   breakout (Turtle), time-series momentum, buy & hold, and the **Mega Score Regime**
@@ -188,8 +207,8 @@ snapshot and restores one, so take one before a big update.
 ```
 src/
   app/
-    dashboard/            # UI pages (dashboard, holdings, trades, watchlist, mega-indicator, backtest)
-    api/                  # Route handlers (trades, portfolio, watchlist, backtest, mega-indicator, import, data)
+    dashboard/            # UI pages (dashboard, holdings, trades, watchlist, research, mega-indicator, backtest)
+    api/                  # Route handlers (trades, portfolio, watchlist, research, backtest, mega-indicator, import, data)
   components/             # SortableTable, ImportDialog, ThemeProvider
   lib/
     db.ts                 # SQLite schema + queries (trades, watchlist)
@@ -203,6 +222,7 @@ src/
     mega-score.ts         # Look-ahead-safe composite score time series
     mega-history.ts       # Cached score-over-time (SQLite)
     mega-prefs.ts         # Bridges saved Mega Indicator weights into the backtest
+    research.ts           # SEC EDGAR fundamentals, ratios, FX and valuation
 ```
 
 ## Database

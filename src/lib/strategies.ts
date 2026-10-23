@@ -223,10 +223,10 @@ const megaScore: StrategyDef = {
   ],
   minBars: 210,
   validate: (p) => p.entry >= p.exit,
-  generate: ({ high, low, close, volume, params, megaWeights }) => {
+  generate: ({ open, high, low, close, volume, params, megaWeights }) => {
     // Honors the user's Mega Indicator weights (from the Mega Indicator page,
     // piped through config) so the backtest trades the same composite the UI shows.
-    const { score } = computeMegaScoreSeries({ high, low, close, volume }, megaWeights);
+    const { score } = computeMegaScoreSeries({ high, low, close, volume, open }, megaWeights);
     // Optional smoothing of the composite (trailing SMA — causal).
     const s = params.smooth > 1 ? sma(score, Math.round(params.smooth)) : score;
     const pos = new Array(close.length).fill(0);

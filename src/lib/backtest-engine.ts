@@ -470,7 +470,7 @@ export function simulateCore(
     const maF = sma(close, 50);
     const maS = sma(close, 200);
     // Same weights the strategy saw, so the plotted score matches what was traded.
-    const mega = computeMegaScoreSeries({ high, low, close, volume }, config.megaWeights);
+    const mega = computeMegaScoreSeries({ high, low, close, volume, open }, config.megaWeights);
     priceSeries = bars.map((b, i) => ({
       date: b.date,
       close: b.close,

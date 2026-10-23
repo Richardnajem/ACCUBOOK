@@ -15,7 +15,9 @@
 import { ALL_SPECS, MA_PERIODS, effectiveWeight, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
 import {
   sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
-  adx, mfi, obv, keltnerPosition, aroon, superTrend,
+  adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
+  donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
+  balanceOfPower, cmo, percentSlope,
 } from "./ta";
 import { evaluateCustomSeries, type CustomIndicatorDef } from "./custom-indicators";
 
@@ -56,6 +58,8 @@ export function computeMegaScoreSeries(
 ): MegaScoreSeries {
   const { high, low, close, volume } = input;
   const n = close.length;
+  /** Open prices — needed for Balance of Power; absent in some callers. */
+  const open = input.open && input.open.length === n ? input.open : null;
 
   // ─── User-defined indicators (evaluated over the same bars) ──
   let customSpecs: IndicatorSpec[] = [];
@@ -98,6 +102,20 @@ export function computeMegaScoreSeries(
   const aroon25 = aroon(high, low, 25);
   const stTrend = superTrend(high, low, close, 10, 3);
   const vol3d = stdev(close, 3);
+
+  // Workbook 181026 additions — all causal.
+  const donchian20 = donchianPosition(high, low, close, 20);
+  const fibPos = rangePosition(high, low, close, Math.min(252, n));
+  const adlSeries = adl(high, low, close, volume);
+  const adlAvg = sma(adlSeries, 20);
+  const bop14 = open ? windowMean(balanceOfPower(open, high, low, close), 14) : null;
+  const cmf20 = chaikinMoneyFlow(high, low, close, volume, 20);
+  const chaikinOsc = chaikinOscillator(high, low, close, volume, 3, 10);
+  const cmo14 = cmo(close, 14);
+  const ema20 = ema(close, 20);
+  const ema200 = ema(close, 200);
+  const ema20Slope = percentSlope(ema20, close);
+  const ema200Slope = percentSlope(ema200, close);
 
   for (let i = 0; i < n; i++) {
     const px = close[i];
@@ -145,6 +163,47 @@ export function computeMegaScoreSeries(
     if (Number.isFinite(aroon25.osc[i])) put("ta-aroon-osc")[i] = aroon25.osc[i];
     if (Number.isFinite(stTrend.line[i]) && stTrend.line[i] !== 0) {
       put("ta-supertrend")[i] = ((px - stTrend.line[i]) / stTrend.line[i]) * 100;
+    }
+
+    // Donchian / Fibonacci range position, 0-100
+    if (Number.isFinite(donchian20[i])) put("ta-donchian-pos")[i] = donchian20[i];
+    if (Number.isFinite(fibPos[i])) put("ta-fib-pos")[i] = fibPos[i];
+
+    // A/D line vs its 20-bar average, in average days of volume
+    if (Number.isFinite(adlAvg[i]) && Number.isFinite(volAvg[i]) && volAvg[i] > 0) {
+      put("ta-adl-20")[i] = (adlSeries[i] - adlAvg[i]) / volAvg[i];
+    }
+
+    // +DI − −DI, in the same 0-100 units as the directional indices
+    if (Number.isFinite(adx14.plusDi[i]) && Number.isFinite(adx14.minusDi[i])) {
+      put("ta-di-spread")[i] = adx14.plusDi[i] - adx14.minusDi[i];
+    }
+
+    // Smoothed Balance of Power (needs open prices)
+    if (bop14 && Number.isFinite(bop14[i])) put("ta-bop-14")[i] = bop14[i];
+
+    // Chaikin money flow, and the oscillator in days of average volume
+    if (Number.isFinite(cmf20[i])) put("ta-cmf-20")[i] = cmf20[i];
+    if (Number.isFinite(chaikinOsc[i]) && Number.isFinite(volAvg[i]) && volAvg[i] > 0) {
+      put("ta-chaikin-osc")[i] = chaikinOsc[i] / volAvg[i];
+    }
+
+    // Chande momentum and the EMA slopes
+    if (Number.isFinite(cmo14[i])) put("ta-cmo-14")[i] = cmo14[i];
+    if (Number.isFinite(ema20Slope[i])) put("ta-ema20-slope")[i] = ema20Slope[i];
+    if (Number.isFinite(ema200Slope[i])) put("ta-ema200-slope")[i] = ema200Slope[i];
+
+    // CTM: mean of RSI, CMO, EMA-20, EMA-200 and ADX. The workbook averages
+    // the EMA price levels raw; score them as price-vs-EMA first so CTM stays a
+    // bounded 0-100 reading instead of tracking the share price.
+    const emaScore = (ma: number): number => {
+      if (!Number.isFinite(ma) || ma === 0) return NaN;
+      const pct = ((px - ma) / ma) * 100;
+      return Math.max(0, Math.min(100, ((pct + 1) / 2) * 100));
+    };
+    const ctmParts = [rsi14[i], cmo14[i], emaScore(ema20[i]), emaScore(ema200[i]), adx14.adx[i]];
+    if (ctmParts.every(Number.isFinite)) {
+      put("ta-ctm")[i] = ctmParts.reduce((s, v) => s + v, 0) / ctmParts.length;
     }
 
     // 3-day volatility: sample stdev of closes, as % of price

@@ -188,6 +188,8 @@ const categoryIcons: Record<string, string> = {
   Momentum: "🚀",
   Volume: "📊",
   Volatility: "🌊",
+  Swing: "🔁",
+  Composite: "🧮",
 };
 
 type Preset = "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";

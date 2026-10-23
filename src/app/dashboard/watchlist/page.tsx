@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ImportDialog from "@/components/ImportDialog";
 import SymbolDetail, { SymbolMeta } from "@/components/SymbolDetail";
+import { SymbolSuggestionList, useSymbolSuggestions } from "@/components/SymbolSearch";
+import type { SymbolSuggestion } from "@/components/SymbolSearch";
 import { useUndoRedo } from "@/lib/undo-redo";
 import { onSearchRequested } from "@/lib/search-bus";
 
@@ -40,7 +42,16 @@ export default function WatchlistPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [detail, setDetail] = useState<SymbolMeta | null>(null);
   const [search, setSearch] = useState("");
+  const [picked, setPicked] = useState<SymbolSuggestion | null>(null);
   const { push } = useUndoRedo();
+
+  // Typeahead on the add form — the same search the global palette uses, so a
+  // ticker the user has never held can be found by company name.
+  const { suggestions, loading: suggestionsLoading, error: suggestionsError } =
+    useSymbolSuggestions(adding ? symbol : "");
+  const visibleSuggestions = suggestions
+    .filter((s) => s.symbol !== symbol.trim().toUpperCase())
+    .slice(0, 6);
 
   const load = useCallback(() => {
     fetch("/api/watchlist", { cache: "no-store" })
@@ -110,7 +121,7 @@ export default function WatchlistPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to add");
       push({ label: `Watch ${symbol.toUpperCase()}`, undo: async () => {}, redo: async () => {} });
-      setSymbol(""); setTarget(""); setNotes(""); setAdding(false);
+      setSymbol(""); setTarget(""); setNotes(""); setPicked(null); setAdding(false);
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add");
@@ -176,14 +187,38 @@ export default function WatchlistPage() {
 
       {adding && (
         <form onSubmit={add} className="glass rounded-xl p-5 grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-          <div>
+          <div className="relative">
             <label className="block text-xs text-[var(--muted)] mb-1">Symbol</label>
             <input
               required value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              placeholder="AAPL"
+              onChange={(e) => { setSymbol(e.target.value.toUpperCase()); setPicked(null); }}
+              placeholder="AAPL — or type a company name"
+              autoComplete="off"
+              aria-label="Symbol or company name"
               className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm uppercase focus:ring-2 focus:ring-indigo-500 focus:outline-none"
             />
+            {picked && (
+              <p className="mt-1 text-[11px] text-[var(--muted)] truncate">
+                {picked.name} · {[picked.exchange, picked.type].filter(Boolean).join(" · ")}
+              </p>
+            )}
+            {!picked && visibleSuggestions.length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-1 z-30 py-1 max-h-56 overflow-y-auto rounded-lg border border-[var(--card-border)] shadow-xl"
+                style={{ background: "var(--card)" }}>
+                <SymbolSuggestionList
+                  items={visibleSuggestions}
+                  onPick={(item) => { setSymbol(item.symbol); setPicked(item); }}
+                />
+              </div>
+            )}
+            {!picked && symbol.trim().length >= 2 && suggestionsLoading && (
+              <p className="mt-1 text-[11px] text-[var(--muted)]">Searching markets…</p>
+            )}
+            {!picked && suggestionsError && (
+              <p className="mt-1 text-[11px] text-amber-500 dark:text-amber-400">
+                Market search unavailable — the ticker still works.
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-xs text-[var(--muted)] mb-1">Target Price (optional)</label>
@@ -214,11 +249,21 @@ export default function WatchlistPage() {
             <div className="animate-spin w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full" />
           </div>
         ) : filtered.length === 0 ? (
-          <p className="text-sm text-[var(--muted)] text-center py-16 md:col-span-2 xl:col-span-3">
-            {rows.length === 0
-              ? "Watchlist is empty. Add symbols you want to track for entry points."
-              : `No symbols match “${search}”.`}
-          </p>
+          <div className="text-center py-16 md:col-span-2 xl:col-span-3">
+            <p className="text-sm text-[var(--muted)]">
+              {rows.length === 0
+                ? "Watchlist is empty. Add symbols you want to track for entry points."
+                : `No symbols match “${search}”.`}
+            </p>
+            {rows.length > 0 && !adding && search.trim() && (
+              <button
+                onClick={() => { setSymbol(search.trim().toUpperCase()); setPicked(null); setAdding(true); }}
+                className="mt-3 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg"
+              >
+                Add “{search.trim().toUpperCase()}” to the watchlist
+              </button>
+            )}
+          </div>
         ) : (
           filtered.map((row) => {
             const q = row.quote;

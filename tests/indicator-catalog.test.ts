@@ -318,7 +318,7 @@ describe("catalogue indicators match their published definitions", () => {
   });
 
   it("every catalogue indicator is a spec, and each spec is optional by default", () => {
-    expect(OPTIONAL_SPECS.length).toBe(6);
+    expect(OPTIONAL_SPECS.length).toBe(17);
     const ids = OPTIONAL_SPECS.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const spec of OPTIONAL_SPECS) {

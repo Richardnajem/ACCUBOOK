@@ -675,3 +675,246 @@ export function superTrend(
   }
   return { line, direction };
 }
+
+// ─── "Indicators project 181026" additions ──────────────────────
+// The reference workbook's later blocks: Donchian, swing/Fibonacci range,
+// accumulation/distribution, Chaikin money flow & oscillator, Balance of
+// Power, Chande momentum and the EMA slopes. All causal (trailing windows),
+// NaN through warm-up.
+
+export interface DonchianResult {
+  /** Highest high over the window. */
+  upper: number[];
+  /** Lowest low over the window. */
+  lower: number[];
+  /** Midpoint of the two channels. */
+  middle: number[];
+}
+
+/** Donchian channel: the highest high and lowest low of the last `period` bars. */
+export function donchian(highs: number[], lows: number[], period = 20): DonchianResult {
+  const upper = rollingMax(highs, period);
+  const lower = rollingMin(lows, period);
+  const middle = lower.map((lo, i) =>
+    Number.isFinite(lo) && Number.isFinite(upper[i]) ? (lo + upper[i]) / 2 : NaN
+  );
+  return { upper, lower, middle };
+}
+
+/**
+ * Where the close sits inside the Donchian channel, 0-100 (0 = on the lower
+ * channel, 100 = on the upper). A channel with no width has no position.
+ */
+export function donchianPosition(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period = 20
+): number[] {
+  const { upper, lower } = donchian(highs, lows, period);
+  return closes.map((close, i) => {
+    if (!Number.isFinite(close) || !Number.isFinite(upper[i]) || !Number.isFinite(lower[i])) {
+      return NaN;
+    }
+    const width = upper[i] - lower[i];
+    return width > 0 ? ((close - lower[i]) / width) * 100 : NaN;
+  });
+}
+
+/**
+ * Position of the close inside its `period`-bar high-low range, 0-100.
+ * This is the range the workbook draws its Fibonacci retracements on: 100 at
+ * the range high, 0 at the range low. Unlike a rolling channel it uses the
+ * window's extremes directly, so it also answers "how much of the range has
+ * this move retraced?".
+ */
+export function rangePosition(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period: number
+): number[] {
+  const upper = rollingMax(highs, period);
+  const lower = rollingMin(lows, period);
+  return closes.map((close, i) => {
+    if (!Number.isFinite(close) || !Number.isFinite(upper[i]) || !Number.isFinite(lower[i])) {
+      return NaN;
+    }
+    const width = upper[i] - lower[i];
+    return width > 0 ? ((close - lower[i]) / width) * 100 : NaN;
+  });
+}
+
+/**
+ * Chaikin Accumulation/Distribution line.
+ *   MFM = ((C − L) − (H − C)) / (H − L)          (0 when H = L)
+ *   MFV = MFM · volume
+ *   ADLₜ = ADLₜ₋₁ + MFVₜ
+ * The level is arbitrary — compare it with its own average, which is what the
+ * "ADL vs 20-bar average" indicator does. Note that the reference workbook's
+ * ADL column stores only the day's MFV, not the running total; the cumulative
+ * definition above is the standard one (and the one its CMF column implies).
+ */
+export function adl(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  volumes: number[]
+): number[] {
+  const n = closes.length;
+  const out: number[] = new Array(n).fill(NaN);
+  let total = 0;
+  let started = false;
+  for (let i = 0; i < n; i++) {
+    const h = highs[i];
+    const l = lows[i];
+    const c = closes[i];
+    const v = volumes[i];
+    if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c) || !Number.isFinite(v)) {
+      out[i] = started ? total : NaN;
+      continue;
+    }
+    started = true;
+    if (h !== l) total += (((c - l) - (h - c)) / (h - l)) * v;
+    out[i] = total;
+  }
+  return out;
+}
+
+/**
+ * Chaikin Money Flow over `period` bars:
+ *   CMF = Σ(MFV, period) / Σ(volume, period),   MFV = MFM · volume
+ * Range −1…+1; positive means the closes are accumulating on strength.
+ * A window with no volume has no reading (NaN) rather than a fabricated 0.
+ */
+export function chaikinMoneyFlow(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  volumes: number[],
+  period = 20
+): number[] {
+  const n = closes.length;
+  const out: number[] = new Array(n).fill(NaN);
+  if (period <= 0) return out;
+  for (let i = period - 1; i < n; i++) {
+    let flow = 0;
+    let volume = 0;
+    let ok = true;
+    for (let j = i - period + 1; j <= i; j++) {
+      const h = highs[j];
+      const l = lows[j];
+      const c = closes[j];
+      const v = volumes[j];
+      if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c) || !Number.isFinite(v)) {
+        ok = false;
+        break;
+      }
+      if (h !== l) flow += (((c - l) - (h - c)) / (h - l)) * v;
+      volume += v;
+    }
+    if (ok && volume > 0) out[i] = flow / volume;
+  }
+  return out;
+}
+
+/**
+ * Chaikin Oscillator: EMA(fast, ADL) − EMA(slow, ADL). Positive when the
+ * shorter money-flow average is pulling away from the longer one (accumulation
+ * accelerating). The raw value scales with volume, so the app divides it by
+ * average volume before scoring it — days of average volume.
+ */
+export function chaikinOscillator(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  volumes: number[],
+  fast = 3,
+  slow = 10
+): number[] {
+  const line = adl(highs, lows, closes, volumes);
+  const emaAligned = (values: number[], period: number): number[] => {
+    const out: number[] = new Array(values.length).fill(NaN);
+    const start = values.findIndex(Number.isFinite);
+    if (start < 0) return out;
+    const compact = ema(values.slice(start), period);
+    for (let i = 0; i < compact.length; i++) out[start + i] = compact[i];
+    return out;
+  };
+  const fastEma = emaAligned(line, fast);
+  const slowEma = emaAligned(line, slow);
+  return line.map((_, i) =>
+    Number.isFinite(fastEma[i]) && Number.isFinite(slowEma[i]) ? fastEma[i] - slowEma[i] : NaN
+  );
+}
+
+/**
+ * Balance of Power: where the close finished inside the bar's range, from the
+ * open. (C − O)/(H − L): +1 = buyers closed at the high, −1 = sellers closed at
+ * the low. A bar with no range has no answer and stays NaN. The workbook's
+ * "Smoothed BOP (14)" is simply windowMean(bop(...), 14).
+ */
+export function balanceOfPower(
+  opens: number[],
+  highs: number[],
+  lows: number[],
+  closes: number[]
+): number[] {
+  return closes.map((close, i) => {
+    const open = opens[i];
+    const high = highs[i];
+    const low = lows[i];
+    if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) {
+      return NaN;
+    }
+    const range = high - low;
+    return range > 0 ? (close - open) / range : NaN;
+  });
+}
+
+/**
+ * Chande Momentum Oscillator:
+ *   CMO = 100 · (Σup − Σdown) / (Σup + Σdown)   over `period` close changes
+ * Range −100…+100. Unlike RSI it uses no smoothing, so it turns faster; a flat
+ * window has no momentum and reads 0 (the exact neutral value).
+ */
+export function cmo(closes: number[], period = 14): number[] {
+  const n = closes.length;
+  const out: number[] = new Array(n).fill(NaN);
+  if (period <= 0) return out;
+  for (let i = period; i < n; i++) {
+    let up = 0;
+    let down = 0;
+    let ok = true;
+    for (let j = i - period + 1; j <= i; j++) {
+      const ch = closes[j] - closes[j - 1];
+      if (!Number.isFinite(ch)) {
+        ok = false;
+        break;
+      }
+      if (ch > 0) up += ch;
+      else down -= ch;
+    }
+    if (!ok) continue;
+    out[i] = up + down > 0 ? (100 * (up - down)) / (up + down) : 0;
+  }
+  return out;
+}
+
+/**
+ * One-bar percent slope of a series, expressed against a base series:
+ *   slopeᵢ = (vᵢ − vᵢ₋₁) / baseᵢ · 100
+ * Used for the EMA-20 / EMA-200 slopes (base = close), matching the workbook's
+ * "EMA20 slope" / "EMA200 slope" columns.
+ */
+export function percentSlope(values: number[], base: number[]): number[] {
+  return values.map((v, i) => {
+    if (i === 0) return NaN;
+    const prev = values[i - 1];
+    const denom = base[i];
+    if (!Number.isFinite(v) || !Number.isFinite(prev) || !Number.isFinite(denom) || denom === 0) {
+      return NaN;
+    }
+    return ((v - prev) / denom) * 100;
+  });
+}

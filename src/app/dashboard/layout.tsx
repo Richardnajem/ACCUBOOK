@@ -1,9 +1,10 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTheme } from "@/components/ThemeProvider";
 import ImportDialog from "@/components/ImportDialog";
+import { SymbolSuggestionList, useSymbolSuggestions } from "@/components/SymbolSearch";
 import { useUndoRedo } from "@/lib/undo-redo";
 import { dispatchSearch } from "@/lib/search-bus";
 import { useState, useRef, useEffect } from "react";
@@ -13,8 +14,10 @@ const navItems = [
   { label: "Holdings", href: "/dashboard/holdings", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 3v18h18M7 16v-5m4 5V8m4 8v-3m4 3V5" /></svg> },
   { label: "Trade Log", href: "/dashboard/trades", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4" /></svg> },
   { label: "Watchlist", href: "/dashboard/watchlist", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg> },
+  { label: "Research", href: "/dashboard/research", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6M9 8h6M7 3h7l5 5v13a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1z" /></svg> },
   { label: "Mega Indicator", href: "/dashboard/mega-indicator", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364 6.364l-2.122-2.122M7.758 7.758L5.636 5.636m12.728 0l-2.122 2.122M7.758 16.242l-2.122 2.122" /></svg> },
   { label: "Backtesting", href: "/dashboard/backtest", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg> },
+  { label: "Strategies", href: "/strategies", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 6h16M4 12h10M4 18h7" /><circle cx="18.5" cy="13.5" r="2" strokeWidth={1.5} /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.5 15.5v3" /></svg> },
   { label: "Settings", href: "/dashboard/settings", icon: <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg> },
 ];
 
@@ -46,8 +49,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [cmdQuery, setCmdQuery] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [symbols, setSymbols] = useState<SymbolHit[]>([]);
+  const [activeHit, setActiveHit] = useState(0);
+  const router = useRouter();
   const themeRef = useRef<HTMLDivElement>(null);
   const cmdInputRef = useRef<HTMLInputElement>(null);
+  const { suggestions: marketSuggestions, loading: marketLoading, error: marketError } =
+    useSymbolSuggestions(cmdOpen ? cmdQuery : "");
 
   // Close the drawer whenever the route changes
   useEffect(() => {
@@ -65,6 +72,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         e.preventDefault();
         setCmdOpen(prev => !prev);
         setCmdQuery("");
+        setActiveHit(0);
       }
       if (e.key === "Escape") setCmdOpen(false);
       // Undo: Ctrl+Z (not in inputs)
@@ -145,7 +153,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       <nav className="flex-1 py-4 px-3 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
-          const isActive = pathname === item.href;
+          const isActive = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href + "/"));
           return (
             <Link key={item.href} href={item.href}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
@@ -180,6 +188,47 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     ? symbols.filter((s) => s.symbol.toLowerCase().includes(normalizedQuery))
     : symbols;
 
+  // Everything else the query matches, across the whole listed universe — this
+  // is what lets the palette find a stock that is not in the local database yet.
+  const localSymbolSet = new Set(filteredSymbols.map((s) => s.symbol));
+  const marketHits = normalizedQuery
+    ? marketSuggestions.filter((m) => !localSymbolSet.has(m.symbol))
+    : [];
+
+  const pickSymbol = (hit: SymbolHit) => {
+    dispatchSearch(hit.symbol);
+    router.push(symbolHref(hit));
+    setCmdOpen(false);
+  };
+
+  const openInWatchlist = (symbol: string) => {
+    dispatchSearch(symbol);
+    router.push("/dashboard/watchlist");
+    setCmdOpen(false);
+  };
+
+  // ↑/↓ moves through portfolio rows first, then the market matches; ↵ picks.
+  const totalHits = filteredSymbols.length + marketHits.length;
+  const onPaletteKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (totalHits) setActiveHit((i) => (i + 1) % totalHits);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (totalHits) setActiveHit((i) => (i - 1 + totalHits) % totalHits);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const term = cmdQuery.trim();
+      if (!totalHits) {
+        if (term) openInWatchlist(term.toUpperCase());
+        return;
+      }
+      const i = Math.min(activeHit, totalHits - 1);
+      if (i < filteredSymbols.length) pickSymbol(filteredSymbols[i]);
+      else openInWatchlist(marketHits[i - filteredSymbols.length].symbol);
+    }
+  };
+
   return (
     <div className="min-h-screen flex">
       {/* Sidebar (desktop) */}
@@ -212,7 +261,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </button>
           <div className="flex-1">
             <h1 className="text-lg font-semibold">
-              {navItems.find((i) => i.href === pathname)?.label || "Stockfolio"}
+              {navItems.find((i) => i.href === pathname || (i.href !== "/dashboard" && pathname.startsWith(i.href + "/")))?.label || "Stockfolio"}
             </h1>
           </div>
           <div className="flex items-center gap-3">
@@ -264,11 +313,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
 
             {/* Global search (symbols + pages) */}
-            <button onClick={() => { setCmdOpen(true); setCmdQuery(""); }}
+            <button onClick={() => { setCmdOpen(true); setCmdQuery(""); setActiveHit(0); }}
               title="Search symbols and pages (⌘K)"
               className="flex items-center gap-2 pl-2.5 pr-2 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] rounded-lg hover:bg-[var(--card-hover)] border border-[var(--card-border)] transition-colors">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-              <span className="hidden md:inline">Search symbols…</span>
+              <span className="hidden md:inline">Search stocks…</span>
               <kbd className="hidden md:inline text-[10px] text-[var(--muted)] bg-[var(--input-bg)] px-1.5 py-0.5 rounded border border-[var(--input-border)]">⌘K</kbd>
             </button>
 
@@ -295,8 +344,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <svg className="w-5 h-5 text-[var(--muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
               <input
                 ref={cmdInputRef}
-                type="text" value={cmdQuery} onChange={(e) => setCmdQuery(e.target.value)}
-                placeholder="Navigate to…"
+                type="text" value={cmdQuery} onChange={(e) => { setCmdQuery(e.target.value); setActiveHit(0); }}
+                onKeyDown={onPaletteKeyDown}
+                placeholder="Search any stock, ETF or crypto…"
+                aria-label="Search any stock, exchange-traded fund or cryptocurrency"
                 className="flex-1 bg-transparent text-sm focus:outline-none placeholder-[var(--muted)]"
               />
               <kbd className="text-[10px] text-[var(--muted)] bg-[var(--input-bg)] px-1.5 py-0.5 rounded border border-[var(--input-border)]">ESC</kbd>
@@ -321,20 +372,50 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 })}
               {filteredSymbols.length > 0 && (
                 <>
-                  <p className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--muted)]">Symbols</p>
-                  {filteredSymbols.slice(0, 30).map((h) => (
-                    <Link key={h.symbol} href={symbolHref(h)}
-                      onClick={() => { dispatchSearch(h.symbol); setCmdOpen(false); }}
-                      className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] transition-colors">
+                  <p className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--muted)]">
+                    Your portfolio
+                  </p>
+                  {filteredSymbols.slice(0, 30).map((h, i) => (
+                    <button key={h.symbol} type="button"
+                      onClick={() => pickSymbol(h)}
+                      onMouseEnter={() => setActiveHit(i)}
+                      className={`w-full text-left flex items-center gap-3 px-4 py-2 text-sm text-[var(--muted)] transition-colors ${
+                        i === activeHit ? "bg-indigo-500/10 text-[var(--foreground)]" : "hover:text-[var(--foreground)] hover:bg-[var(--card-hover)]"
+                      }`}>
                       <span className="font-bold text-[var(--foreground)] w-16">{h.symbol}</span>
                       <span className="text-[11px] text-[var(--muted)]">{symbolSources(h)}</span>
                       <span className="ml-auto text-[10px] text-[var(--muted)]">open →</span>
-                    </Link>
+                    </button>
                   ))}
                 </>
               )}
-              {filteredNav.length === 0 && filteredSymbols.length === 0 && (
-                <p className="text-sm text-[var(--muted)] text-center py-8">No matching symbols or pages</p>
+              {(marketHits.length > 0 || (normalizedQuery && marketLoading)) && (
+                <>
+                  <p className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--muted)] flex items-center gap-2">
+                    All markets
+                    {marketLoading && (
+                      <span className="w-2.5 h-2.5 border border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                    )}
+                  </p>
+                  <SymbolSuggestionList
+                    items={marketHits}
+                    activeIndex={activeHit - filteredSymbols.length}
+                    onPick={(item) => openInWatchlist(item.symbol)}
+                    onHover={(i) => setActiveHit(filteredSymbols.length + i)}
+                  />
+                </>
+              )}
+              {normalizedQuery && marketError && (
+                <p className="px-4 py-2 text-[11px] text-amber-500 dark:text-amber-400">
+                  Market search is unavailable ({marketError}). Type the ticker and press ↵ to add it.
+                </p>
+              )}
+              {filteredNav.length === 0 && totalHits === 0 && !marketLoading && (
+                <p className="text-sm text-[var(--muted)] text-center py-8">
+                  {normalizedQuery
+                    ? `No match for “${cmdQuery.trim()}”. Press ↵ to open it on the watchlist and add it.`
+                    : "Type a ticker or company name — every listed stock is searchable."}
+                </p>
               )}
             </div>
           </div>
