@@ -336,14 +336,20 @@ describe("181026 additions are catalogue indicators", () => {
 // ─── Workbook regression (skipped when the file is absent) ─────
 
 const WORKBOOK = fileURLToPath(new URL("../../Indicators project 181026.xlsx", import.meta.url));
-const suite = existsSync(WORKBOOK) ? describe : describe.skip;
+const hasWorkbook = existsSync(WORKBOOK);
+const suite = hasWorkbook ? describe : describe.skip;
 
 suite("Indicators project 181026.xlsx columns", () => {
-  const wb = XLSX.read(readFileSync(WORKBOOK), { type: "buffer" });
-  const matrix = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
-    header: 1,
-    defval: "",
-  }) as unknown[][];
+  // Vitest still runs a skipped suite's factory to register its tests, so the
+  // workbook must only be opened when it exists — CI never has this git-ignored
+  // file, and reading it here failed the whole run before any test ran.
+  const wb = hasWorkbook ? XLSX.read(readFileSync(WORKBOOK), { type: "buffer" }) : null;
+  const matrix = (wb
+    ? XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+        header: 1,
+        defval: "",
+      })
+    : []) as unknown[][];
 
   // Keep rows with a complete OHLCV record and put them oldest → newest,
   // which is the order lib/ta computes on. The workbook itself is newest-first.
