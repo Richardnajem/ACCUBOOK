@@ -19,6 +19,10 @@ export interface BacktestConfig {
   params: Record<string, number>;
   stopLossPct?: number;    // 0/undefined = disabled; else exit if price falls this % below entry
   takeProfitPct?: number;  // 0/undefined = disabled; else exit if price rises this % above entry
+  /** Hard entry budget: no new position once this many trades have been opened (0/undefined = unlimited). */
+  maxTrades?: number;
+  /** Quality floor: warn when the run closes fewer trades than this (0/undefined = no minimum). */
+  minTrades?: number;
   benchmarkSymbol?: string; // default: same ticker (its buy & hold)
   megaWeights?: WeightMap; // per-indicator weights for the Mega Score strategy/chart overlay
 }
@@ -216,6 +220,11 @@ export function simulateCore(
   const stopMult = config.stopLossPct && config.stopLossPct > 0 ? 1 - config.stopLossPct / 100 : null;
   const tpMult = config.takeProfitPct && config.takeProfitPct > 0 ? 1 + config.takeProfitPct / 100 : null;
 
+  // Optional trade budget (cap on entries) and quality floor (warning only).
+  const maxTrades = config.maxTrades && config.maxTrades > 0 ? Math.floor(config.maxTrades) : null;
+  const minTrades = config.minTrades && config.minTrades > 0 ? Math.floor(config.minTrades) : null;
+  let hitTradeLimit = false;
+
   // Benchmark series aligned to the strategy's dates (forward-filled for
   // calendar mismatches when the benchmark is a different ticker), indexed to
   // 100 at the start like the equity curve.
@@ -247,6 +256,12 @@ export function simulateCore(
   const trades: TradeRecord[] = [];
 
   const buy = (i: number) => {
+    // The budget caps entries, not exits: a position already open still runs
+    // to its own signal/stop/target.
+    if (maxTrades !== null && trades.length >= maxTrades) {
+      hitTradeLimit = true;
+      return;
+    }
     const fill = open[i] * (1 + slippageRate);
     const budget = Math.min((cash + shares * close[i - 1]) * (positionPct / 100), cash);
     const sh = Math.floor(budget / (fill * (1 + commissionRate)));
@@ -484,6 +499,22 @@ export function simulateCore(
   const warnings: string[] = [];
   if (closed.length > 0 && closed.length < 5) {
     warnings.push("Fewer than 5 closed trades — results are not statistically meaningful.");
+  }
+  if (maxTrades !== null && minTrades !== null && minTrades > maxTrades) {
+    warnings.push(
+      `Max trades (${maxTrades}) is below the minimum of ${minTrades} — the minimum can never be met.`
+    );
+  }
+  if (minTrades !== null && closed.length < minTrades) {
+    warnings.push(
+      `Only ${closed.length} closed trade${closed.length === 1 ? "" : "s"} — below the minimum of ${minTrades} you set. ` +
+      "Treat the statistics as indicative, not proven."
+    );
+  }
+  if (hitTradeLimit && maxTrades !== null) {
+    warnings.push(
+      `Entry limit reached: no new trades were opened after ${maxTrades} trade${maxTrades === 1 ? "" : "s"}.`
+    );
   }
 
   return {

@@ -69,6 +69,8 @@ export async function POST(request: NextRequest) {
           params: (data.params && typeof data.params === 'object') ? data.params : {},
           stopLossPct: data.stopLossPct != null && Number(data.stopLossPct) > 0 ? Number(data.stopLossPct) : undefined,
           takeProfitPct: data.takeProfitPct != null && Number(data.takeProfitPct) > 0 ? Number(data.takeProfitPct) : undefined,
+          maxTrades: data.maxTrades != null && Number(data.maxTrades) > 0 ? Math.floor(Number(data.maxTrades)) : undefined,
+          minTrades: data.minTrades != null && Number(data.minTrades) > 0 ? Math.floor(Number(data.minTrades)) : undefined,
           benchmarkSymbol: data.benchmarkSymbol ? String(data.benchmarkSymbol).trim().toUpperCase() : undefined,
           megaWeights: parseMegaWeights(data.megaWeights),
         };

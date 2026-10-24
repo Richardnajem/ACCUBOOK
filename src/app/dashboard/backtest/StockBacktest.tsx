@@ -59,6 +59,8 @@ export default function StockBacktest() {
   const [params, setParams] = useState<Record<string, number>>({});
   const [stopLossPct, setStopLossPct] = useState(0);
   const [takeProfitPct, setTakeProfitPct] = useState(0);
+  const [maxTrades, setMaxTrades] = useState(0);
+  const [minTrades, setMinTrades] = useState(0);
   const [benchmarkSymbol, setBenchmarkSymbol] = useState("");
   const [useMegaPrefs, setUseMegaPrefs] = useState(false);
   const [megaPrefs, setMegaPrefs] = useState<MegaPrefs>({ weights: null, preset: null, ticker: null, hasCustomWeights: false });
@@ -117,6 +119,8 @@ export default function StockBacktest() {
           positionPct,
           stopLossPct,
           takeProfitPct,
+          maxTrades,
+          minTrades,
           benchmarkSymbol,
           megaWeights: activeMegaWeights(useMegaPrefs, megaPrefs) ?? undefined,
           params: overrides?.params ?? params,
@@ -130,7 +134,7 @@ export default function StockBacktest() {
     } finally {
       setRunning(false);
     }
-  }, [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, benchmarkSymbol, useMegaPrefs, megaPrefs]);
+  }, [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, maxTrades, minTrades, benchmarkSymbol, useMegaPrefs, megaPrefs]);
 
   const handleApplyFromOptimizer = useCallback((sid: string, p: Record<string, number>) => {
     setMode("single");
@@ -327,6 +331,22 @@ export default function StockBacktest() {
             </div>
             <div>
               <label className="block text-xs text-[var(--muted)] mb-1">
+                Max trades <span className="opacity-60">(0 = no limit)</span>
+              </label>
+              <input type="number" value={maxTrades} min={0} max={10000} onChange={(e) => setMaxTrades(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                title="No new position is opened after this many trades; an open trade still exits on its own signal/stop/target."
+                className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--muted)] mb-1">
+                Min trades <span className="opacity-60">(0 = no minimum)</span>
+              </label>
+              <input type="number" value={minTrades} min={0} max={10000} onChange={(e) => setMinTrades(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                title="Warn when the run closes fewer trades than this — a short sample is not proof of an edge."
+                className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--muted)] mb-1">
                 Benchmark <span className="opacity-60">(blank = same ticker)</span>
               </label>
               <input
@@ -419,7 +439,7 @@ export default function StockBacktest() {
             {card("Sharpe Ratio", s.sharpe.toFixed(2), s.sharpe >= 1 ? "good" : s.sharpe >= 0.5 ? "neutral" : "bad")}
             {card("Sortino Ratio", s.sortino.toFixed(2), s.sortino >= 1 ? "good" : "neutral")}
             {card("Max Drawdown", pct(-s.maxDrawdownPct), "bad", `B&H: ${pct(-s.benchmarkMaxDrawdownPct)}`)}
-            {card("Win Rate", pct(s.winRate), "neutral", `${s.totalTrades} closed trades`)}
+            {card("Win Rate", pct(s.winRate), "neutral", `${s.totalTrades} closed trades${maxTrades > 0 ? ` · max ${maxTrades}` : ""}${minTrades > 0 ? ` · min ${minTrades}` : ""}`)}
             {card("Profit Factor", s.profitFactor >= 99 ? "∞" : s.profitFactor.toFixed(2), s.profitFactor >= 1.5 ? "good" : s.profitFactor >= 1 ? "neutral" : "bad")}
             {card("Avg Trade", pct(s.avgTradeReturnPct, 2), s.avgTradeReturnPct >= 0 ? "good" : "bad", `best ${pct(s.bestTradePct, 1)} / worst ${pct(s.worstTradePct, 1)}`)}
             {card("Avg Hold", `${s.avgBarsHeld.toFixed(0)} days`, "neutral")}

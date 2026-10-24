@@ -232,3 +232,63 @@ describe("simulateCore: SMA crossover strategy", () => {
     expect(out.summary.finalEquity).toBeCloseTo(10_000 + totalPnl, 4);
   });
 });
+
+// ─── Trade limits (min / max) ──────────────────────────────────
+describe("simulateCore: trade limits", () => {
+  // 12 bars, long on every other bar → five round trips.
+  const alternating: StrategyDef = {
+    id: "test_alternating",
+    name: "Alternating (test)",
+    description: "test-only strategy",
+    params: [],
+    minBars: 0,
+    generate: () => [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+  };
+  const bars = makeBars(Array.from({ length: 12 }, (_, i) => 100 + i));
+
+  const runWith = (overrides: Partial<BacktestConfig> = {}) => {
+    const config = baseConfig({ strategyId: "test_alternating", ...overrides });
+    return simulateCore(bars, META, "cache", alternating, resolveCosts(config), config, false);
+  };
+
+  it("caps entries at maxTrades and still closes the trade already open", () => {
+    const unlimited = runWith();
+    expect(unlimited.trades.length).toBeGreaterThan(2);
+
+    const capped = runWith({ maxTrades: 2 });
+    expect(capped.trades).toHaveLength(2);
+    expect(capped.summary.totalTrades).toBe(2);
+    for (const t of capped.trades) expect(t.exitDate).not.toBeNull();
+    expect(capped.warnings.some((w) => w.includes("Entry limit reached"))).toBe(true);
+    // The entries that did happen are the first two the strategy signalled.
+    expect(capped.trades[0].entryDate).toBe(unlimited.trades[0].entryDate);
+    expect(capped.trades[1].entryDate).toBe(unlimited.trades[1].entryDate);
+  });
+
+  it("maxTrades above the signal count changes nothing", () => {
+    const unlimited = runWith();
+    const capped = runWith({ maxTrades: 99 });
+    expect(capped.trades).toHaveLength(unlimited.trades.length);
+    expect(capped.summary.totalReturnPct).toBeCloseTo(unlimited.summary.totalReturnPct, 10);
+    expect(capped.warnings.some((w) => w.includes("Entry limit"))).toBe(false);
+  });
+
+  it("minTrades warns only when the run closes fewer trades than the floor", () => {
+    const short = runWith({ minTrades: 10 });
+    expect(short.warnings.some((w) => w.includes("below the minimum of 10"))).toBe(true);
+
+    const met = runWith({ minTrades: 3 });
+    expect(met.warnings.some((w) => w.includes("below the minimum"))).toBe(false);
+  });
+
+  it("warns when maxTrades makes minTrades impossible to satisfy", () => {
+    const out = runWith({ maxTrades: 2, minTrades: 5 });
+    expect(out.warnings.some((w) => w.includes("can never be met"))).toBe(true);
+  });
+
+  it("0 means unlimited and no minimum", () => {
+    const out = runWith({ maxTrades: 0, minTrades: 0 });
+    expect(out.trades).toHaveLength(runWith().trades.length);
+    expect(out.warnings.some((w) => w.includes("Entry limit") || w.includes("minimum"))).toBe(false);
+  });
+});
