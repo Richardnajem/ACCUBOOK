@@ -113,6 +113,7 @@ export async function POST(request: NextRequest) {
           slippageBps: Number(data.slippageBps ?? 0),
           positionPct: Number(data.positionPct ?? 100),
           megaWeights: parseMegaWeights(data.megaWeights),
+          minTrades: data.minTrades != null && Number(data.minTrades) > 0 ? Math.floor(Number(data.minTrades)) : undefined,
           params: (data.params && typeof data.params === 'object') ? data.params : {},
         };
         if (!cfg.symbol || !cfg.strategyId) {
@@ -132,6 +133,7 @@ export async function POST(request: NextRequest) {
           slippageBps: Number(data.slippageBps ?? 0),
           positionPct: Number(data.positionPct ?? 100),
           megaWeights: parseMegaWeights(data.megaWeights),
+          minTrades: data.minTrades != null && Number(data.minTrades) > 0 ? Math.floor(Number(data.minTrades)) : undefined,
           params: {},
         };
         if (!cfg.symbol || !cfg.strategyId) {

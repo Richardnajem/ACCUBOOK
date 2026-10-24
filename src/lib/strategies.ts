@@ -215,10 +215,15 @@ const megaScore: StrategyDef = {
   id: "mega_score",
   name: "Mega Score Regime",
   description:
-    "Uses the app's own composite Mega Indicator: go long when the weighted technical health score reaches the buy threshold, step aside when it falls to the sell threshold. The defaults are the Mega Indicator's own baseline bands (buy ≥ 65, sell ≤ 35); lowering them trades more often, raising them waits for a stronger reading. Buy must stay at or above the sell level so the position doesn't flip on noise. Every input indicator is computed with trailing windows only (no look-ahead).",
+    "Trades the app's own composite Mega Score (0-100, a weighted blend of the ~150 causal technical indicators). " +
+    "Entry score = buy at or above it: the score has to reach that level before a long position is opened. " +
+    "Exit score = sell at or below it: the score has to fall to that level before the position is closed. " +
+    "Between the two the strategy holds whatever it already has, and the gap between them is the no-trade band that stops it flipping on noise. " +
+    `Defaults are the Mega Indicator baseline (entry ${MEGA_BUY_ABOVE}, exit ${MEGA_SELL_BELOW}); lower bands trade more often, higher bands wait for a stronger reading, and a wider gap means fewer, longer trades. ` +
+    "Entry must stay at or above exit. Signals fill at the next day's open and every input indicator uses trailing windows only (no look-ahead).",
   params: [
-    { key: "entry", label: "Buy when score ≥", default: MEGA_BUY_ABOVE, min: 10, max: 90 },
-    { key: "exit", label: "Sell when score ≤", default: MEGA_SELL_BELOW, min: 5, max: 85 },
+    { key: "entry", label: "Entry score (buy ≥)", default: MEGA_BUY_ABOVE, min: 10, max: 90 },
+    { key: "exit", label: "Exit score (sell ≤)", default: MEGA_SELL_BELOW, min: 5, max: 85 },
     { key: "smooth", label: "Score smoothing (days)", default: 5, min: 1, max: 60 },
   ],
   minBars: 210,

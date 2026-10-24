@@ -76,6 +76,10 @@ leaves your machine.
   factor, monthly returns, equity curve, per-trade P&L.
 - **Mega Score overlay** — the composite score is plotted under the price chart so
   entries/exits are explainable.
+- **Trade log detail** — click any trade (or its Entry date) for the exact entry and
+  exit sessions and the Mega Score reading that triggered each side, with the fill
+  day's own score beside it. The table columns and CSV export carry the same scores;
+  stop-loss re-entries are flagged (↻) because they reopen without a fresh crossing.
 - **Strategy comparison** — run every strategy against the same ticker and rank them.
 - **Parameter optimization** — sweep strategy parameters over a grid heatmap.
 - **Walk-forward optimization** — repeatedly optimize on a rolling training window

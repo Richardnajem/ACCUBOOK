@@ -21,7 +21,11 @@ export interface BacktestConfig {
   takeProfitPct?: number;  // 0/undefined = disabled; else exit if price rises this % above entry
   /** Hard entry budget: no new position once this many trades have been opened (0/undefined = unlimited). */
   maxTrades?: number;
-  /** Quality floor: warn when the run closes fewer trades than this (0/undefined = no minimum). */
+  /**
+   * Quality floor: the run should close at least this many trades. A single
+   * backtest is flagged when it falls short, and the optimizer / walk-forward
+   * refuse to rank a candidate below the floor (0/undefined = no minimum).
+   */
   minTrades?: number;
   benchmarkSymbol?: string; // default: same ticker (its buy & hold)
   megaWeights?: WeightMap; // per-indicator weights for the Mega Score strategy/chart overlay
@@ -39,6 +43,23 @@ export interface TradeRecord {
   returnPct: number;
   bars: number;
   reason: string;
+  /** The reading that triggered the entry (the signal bar — one session before
+   *  the fill), i.e. the Mega Score after the strategy's smoothing when it
+   *  smooths. Null when the run skipped the score series (bulk compare/optimize)
+   *  or the bar had no reading yet. */
+  entryScore?: number | null;
+  /** Mega Score on the entry fill day's close (the fill itself is at its open). */
+  entryFillScore?: number | null;
+  /** Mega Score that triggered the exit. For a signal exit that is the previous
+   *  close (smoothed like the entry); a stop/target exit fires intra-bar, so it
+   *  is the exit day's score. Null for an end-of-test close. */
+  exitScore?: number | null;
+  /** Mega Score on the exit fill day's close. */
+  exitFillScore?: number | null;
+  /** True when this long re-opened right after a stop/target exit while the
+   *  regime was still long — no fresh score crossing caused it, so its signal
+   *  reading can legitimately sit below the buy band. */
+  reentry?: boolean;
 }
 
 export type ExitReason = "signal" | "stop-loss" | "take-profit" | "end-of-test";
@@ -60,6 +81,8 @@ export interface WalkForwardFold {
   testReturnPct: number;
   testMaxDrawdownPct: number;
   testTrades: number;
+  /** False when the out-of-sample window closed fewer trades than the min-trades floor. */
+  meetsMinTrades: boolean;
   isFail: boolean; // test Sharpe < 50% of train Sharpe (overfit warning per fold)
 }
 
@@ -73,6 +96,8 @@ export interface WalkForwardResult {
   dataSource: "cache" | "yahoo";
   trainBars: number;
   testBars: number;
+  /** The min-trades floor used to pick parameters inside each fold (null = none). */
+  minTrades: number | null;
   folds: WalkForwardFold[];
   oosSharpe: number;         // Sharpe of the stitched out-of-sample equity curve
   oosReturnPct: number;
@@ -128,6 +153,10 @@ export interface BacktestOutput {
   monthlyReturns: Array<{ month: string; ret: number }>;
   priceSeries: Array<{ date: string; close: number; ma1: number | null; ma2: number | null; mega: number | null }>;
   megaScoreDescription: string;
+  /** The min-trades floor this run was measured against (null = none set). */
+  minTrades: number | null;
+  /** True when the floor is unset or the run closed at least that many trades. */
+  meetsMinTrades: boolean;
   warnings: string[];
 }
 
@@ -137,6 +166,60 @@ export interface ResolvedCosts {
   slippageBps: number;
   positionPct: number;
   years: number;
+}
+
+/** Normalized min-trades floor: a positive integer, or null when unset. */
+export function minTradesFloor(minTrades?: number): number | null {
+  return minTrades && minTrades > 0 && Number.isFinite(minTrades) ? Math.floor(minTrades) : null;
+}
+
+export interface TradeFloorResult<T> {
+  /** Candidates allowed to be ranked as "best". Falls back to all of them when none clears the floor. */
+  pool: T[];
+  /** How many candidates were dropped for closing fewer trades than the floor. */
+  belowFloor: number;
+  /** True when nothing cleared the floor, so the pool ignores it (reported, never hidden). */
+  usedFallback: boolean;
+  /** Human-readable consequence, or null when every candidate cleared the floor. */
+  warning: string | null;
+}
+
+/**
+ * Apply the min-trades quality floor to a set of candidate runs (optimizer
+ * combinations, walk-forward parameter sets). A Sharpe computed from two trades
+ * is noise, so anything below the floor cannot be ranked as the best — unless
+ * *nothing* clears it, in which case the full set is returned with a warning
+ * rather than pretending the sweep found nothing.
+ */
+export function applyTradeFloor<T>(
+  items: T[],
+  minTrades: number | null | undefined,
+  tradesOf: (item: T) => number
+): TradeFloorResult<T> {
+  const floor = minTradesFloor(minTrades ?? undefined);
+  if (floor === null || items.length === 0) {
+    return { pool: items, belowFloor: 0, usedFallback: false, warning: null };
+  }
+  const eligible = items.filter((item) => tradesOf(item) >= floor);
+  const belowFloor = items.length - eligible.length;
+  const trades = `${floor} trade${floor === 1 ? "" : "s"}`;
+  if (eligible.length === 0) {
+    return {
+      pool: items,
+      belowFloor,
+      usedFallback: true,
+      warning: `No candidate closed at least ${trades} — the picks below ignore your minimum-trades floor.`,
+    };
+  }
+  return {
+    pool: eligible,
+    belowFloor,
+    usedFallback: false,
+    warning:
+      belowFloor > 0
+        ? `${belowFloor} of ${items.length} candidates closed fewer than ${trades} and were excluded from the best picks.`
+        : null,
+  };
 }
 
 export function resolveCosts(config: BacktestConfig): ResolvedCosts {
@@ -222,7 +305,7 @@ export function simulateCore(
 
   // Optional trade budget (cap on entries) and quality floor (warning only).
   const maxTrades = config.maxTrades && config.maxTrades > 0 ? Math.floor(config.maxTrades) : null;
-  const minTrades = config.minTrades && config.minTrades > 0 ? Math.floor(config.minTrades) : null;
+  const minTrades = minTradesFloor(config.minTrades);
   let hitTradeLimit = false;
 
   // Benchmark series aligned to the strategy's dates (forward-filled for
@@ -247,6 +330,25 @@ export function simulateCore(
   let cash = initialCapital;
   let shares = 0;
   let entryBar = 0;
+  /** Bar of the last stop/target exit — the next bar's buy is a re-entry. */
+  let lastRiskExitBar = -1;
+  // Mega Score per bar, so each trade can carry the reading on its actual
+  // entry/exit day. Only full single runs compute it (the price chart needs the
+  // same series); bulk compare/optimize skip it, exactly like `priceSeries`.
+  const megaScores: number[] | null = charts
+    ? computeMegaScoreSeries({ high, low, close, volume, open }, config.megaWeights).score
+    : null;
+  // The Mega Score strategy compares its bands against the smoothed series, so
+  // the log records that exact number (plus the raw fill-day reading) — a
+  // "sell ≤ 35" exit should never show 35.1 with no explanation.
+  const smoothDays = strategy.id === "mega_score" ? Math.max(1, Math.round(Number(params.smooth) || 1)) : 1;
+  const signalScores: number[] | null = megaScores && smoothDays > 1 ? sma(megaScores, smoothDays) : megaScores;
+  const round1 = (v: number | undefined): number | null =>
+    v != null && Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
+  /** Raw Mega Score on bar i (what the chart plots). */
+  const scoreAt = (i: number): number | null => round1(megaScores?.[i]);
+  /** Score after the strategy's smoothing — the number its bands check. */
+  const signalScoreAt = (i: number): number | null => round1(signalScores?.[i]);
   let peak = initialCapital;
   let maxDD = 0;
   let benchPeak = initialCapital;
@@ -282,6 +384,11 @@ export function simulateCore(
         returnPct: 0,
         bars: 0,
         reason: "signal",
+        entryScore: signalScoreAt(i - 1),
+        entryFillScore: scoreAt(i),
+        exitScore: null,
+        exitFillScore: null,
+        reentry: lastRiskExitBar === i - 1,
       });
     } else {
       // Pyramiding is unreachable with binary signals (buy only fires when
@@ -310,6 +417,11 @@ export function simulateCore(
       t.exitPrice = fill;
       t.bars = i - entryBar;
       t.reason = reason;
+      t.exitFillScore = scoreAt(i);
+      // No score triggered an end-of-test close, so leave the signal reading out
+      // rather than mislabel the last bar's score as a sell signal.
+      t.exitScore = reason === "signal" ? signalScoreAt(i - 1) : reason === "end-of-test" ? null : scoreAt(i);
+      if (reason === "stop-loss" || reason === "take-profit") lastRiskExitBar = i;
       const costBasis = t.shares * t.entryPrice;
       const entryFee = costBasis * commissionRate;
       t.pnl = gross - exitFee - costBasis - entryFee;
@@ -484,17 +596,18 @@ export function simulateCore(
   if (charts) {
     const maF = sma(close, 50);
     const maS = sma(close, 200);
-    // Same weights the strategy saw, so the plotted score matches what was traded.
-    const mega = computeMegaScoreSeries({ high, low, close, volume, open }, config.megaWeights);
+    // Same series the trades were annotated from, so chart and log agree.
     priceSeries = bars.map((b, i) => ({
       date: b.date,
       close: b.close,
       ma1: i >= 49 ? maF[i] : null,
       ma2: i >= 199 ? maS[i] : null,
-      mega: Number.isFinite(mega.score[i]) ? mega.score[i] : null,
+      mega: scoreAt(i),
     }));
     megaScoreDescription = describeMegaWeights(config.megaWeights);
   }
+
+  const meetsMinTrades = minTrades === null || closed.length >= minTrades;
 
   const warnings: string[] = [];
   if (closed.length > 0 && closed.length < 5) {
@@ -509,6 +622,11 @@ export function simulateCore(
     warnings.push(
       `Only ${closed.length} closed trade${closed.length === 1 ? "" : "s"} — below the minimum of ${minTrades} you set. ` +
       "Treat the statistics as indicative, not proven."
+    );
+  }
+  if (minTrades !== null && closed.length === 0) {
+    warnings.push(
+      "No trades were closed at all — the thresholds are too strict (or too wide a band) for this history."
     );
   }
   if (hitTradeLimit && maxTrades !== null) {
@@ -534,6 +652,8 @@ export function simulateCore(
     monthlyReturns: monthly,
     priceSeries,
     megaScoreDescription,
+    minTrades,
+    meetsMinTrades,
     warnings,
   };
 }
@@ -663,6 +783,8 @@ export interface OptimizePoint {
   maxDrawdownPct: number;
   winRate: number;
   totalTrades: number;
+  /** False when this combination closed fewer trades than the min-trades floor. */
+  meetsMinTrades: boolean;
 }
 
 export interface OptimizeResult {
@@ -677,6 +799,10 @@ export interface OptimizeResult {
   xAxis: string;
   yAxis: string;
   points: OptimizePoint[];
+  /** The min-trades floor applied to the picks (null = none). */
+  minTrades: number | null;
+  /** Combinations dropped from the best picks for closing fewer trades than the floor. */
+  belowFloor: number;
   best: OptimizePoint | null;
   byReturn: OptimizePoint | null;
   byDrawdown: OptimizePoint | null;
@@ -774,6 +900,7 @@ export async function runStrategyOptimization(config: BacktestConfig): Promise<O
         maxDrawdownPct: out.summary.maxDrawdownPct,
         winRate: out.summary.winRate,
         totalTrades: out.summary.totalTrades,
+        meetsMinTrades: out.meetsMinTrades,
       });
     } catch {
       // e.g. fast >= slow — skip invalid combinations
@@ -785,9 +912,16 @@ export async function runStrategyOptimization(config: BacktestConfig): Promise<O
     throw new Error("All parameter combinations failed — check the parameter ranges.");
   }
 
-  const bySharpe = [...points].sort((a, b) => b.sharpe - a.sharpe);
-  const byReturn = [...points].sort((a, b) => b.totalReturnPct - a.totalReturnPct);
-  const byDrawdown = [...points].sort((a, b) => a.maxDrawdownPct - b.maxDrawdownPct);
+  // Min-trades floor: a combination that only traded twice cannot win on
+  // Sharpe. The pool keeps the floor unless nothing clears it (then the sweep
+  // says so instead of silently returning nothing).
+  const minTrades = minTradesFloor(config.minTrades);
+  const floor = applyTradeFloor(points, minTrades, (p) => p.totalTrades);
+  if (floor.warning) warnings.push(floor.warning);
+
+  const bySharpe = [...floor.pool].sort((a, b) => b.sharpe - a.sharpe);
+  const byReturn = [...floor.pool].sort((a, b) => b.totalReturnPct - a.totalReturnPct);
+  const byDrawdown = [...floor.pool].sort((a, b) => a.maxDrawdownPct - b.maxDrawdownPct);
 
   warnings.push(
     "Optimization finds the best parameters for this exact window — treat the result as descriptive, not predictive (overfitting risk)."
@@ -805,6 +939,8 @@ export async function runStrategyOptimization(config: BacktestConfig): Promise<O
     xAxis: xAxisParam.key,
     yAxis: yAxisParam.key,
     points,
+    minTrades,
+    belowFloor: floor.belowFloor,
     best: bySharpe[0],
     byReturn: byReturn[0],
     byDrawdown: byDrawdown[0],
@@ -846,6 +982,10 @@ export async function runWalkForwardOptimization(
   const msPerYear = 365.25 * 86400_000;
   const startT = new Date(bars[0].date).getTime();
   const endT = new Date(bars[bars.length - 1].date).getTime();
+
+  const minTrades = minTradesFloor(config.minTrades);
+  /** Folds where no parameter set cleared the min-trades floor on the training window. */
+  let floorFallbackFolds = 0;
 
   const folds: WalkForwardFold[] = [];
   const stitched: WalkForwardResult["stitchedEquity"] = [];
@@ -892,16 +1032,18 @@ export async function runWalkForwardOptimization(
       break;
     }
 
-    // Pick the best params on the training window only.
-    let best: { params: Record<string, number>; sharpe: number } | null = null;
+    // Pick the best params on the training window only, applying the
+    // min-trades floor so a two-trade fluke cannot win a fold.
+    const candidates: Array<{ params: Record<string, number>; sharpe: number; totalTrades: number }> = [];
     for (const p of grid) {
       try {
         const out = simulateCore(train, meta, source, strategy, costs, { ...config, params: p }, false);
-        if (!best || out.summary.sharpe > best.sharpe) {
-          best = { params: p, sharpe: out.summary.sharpe };
-        }
+        candidates.push({ params: p, sharpe: out.summary.sharpe, totalTrades: out.summary.totalTrades });
       } catch { /* invalid combo — skip */ }
     }
+    const foldFloor = applyTradeFloor(candidates, minTrades, (c) => c.totalTrades);
+    if (foldFloor.usedFallback) floorFallbackFolds++;
+    const best = [...foldFloor.pool].sort((a, b) => b.sharpe - a.sharpe)[0] ?? null;
     if (!best) {
       warnings.push(`Fold starting ${new Date(trainFromT).toISOString().slice(0, 10)}: every parameter combination failed.`);
       cursorT = trainToT;
@@ -937,6 +1079,7 @@ export async function runWalkForwardOptimization(
       testReturnPct: testRun.summary.totalReturnPct,
       testMaxDrawdownPct: testRun.summary.maxDrawdownPct,
       testTrades: testRun.summary.totalTrades,
+      meetsMinTrades: minTrades === null || testRun.summary.totalTrades >= minTrades,
       isFail: trainRun.summary.sharpe > 0 && testRun.summary.sharpe < 0.5 * trainRun.summary.sharpe,
     });
 
@@ -976,6 +1119,20 @@ export async function runWalkForwardOptimization(
   }
   const oosReturnPct = stitched.length ? (stitched[stitched.length - 1].equity / 100 - 1) * 100 : 0;
 
+  if (minTrades !== null && floorFallbackFolds > 0) {
+    warnings.push(
+      `${floorFallbackFolds}/${folds.length} fold${folds.length === 1 ? "" : "s"} had no parameter set closing ${minTrades}+ trades on the training window — those folds fell back to the best Sharpe regardless of the floor.`
+    );
+  }
+  if (minTrades !== null) {
+    const shortFolds = folds.filter(f => !f.meetsMinTrades).length;
+    if (shortFolds > 0) {
+      warnings.push(
+        `${shortFolds}/${folds.length} out-of-sample fold${folds.length === 1 ? "" : "s"} closed fewer than ${minTrades} trades — read those returns as indicative.`
+      );
+    }
+  }
+
   const oosFails = folds.filter(f => f.isFail).length;
   if (oosFails > 0) {
     warnings.push(`${oosFails}/${folds.length} folds degraded badly out-of-sample (test Sharpe < 50% of train) — sign of overfitting.`);
@@ -994,6 +1151,7 @@ export async function runWalkForwardOptimization(
     dataSource: source,
     trainBars: Math.round(trainYears * 252),
     testBars: Math.round(testYears * 252),
+    minTrades,
     folds,
     oosSharpe,
     oosReturnPct,

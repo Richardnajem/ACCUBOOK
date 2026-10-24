@@ -7,9 +7,10 @@ import {
 } from "recharts";
 import { SortableTable, Column } from "@/components/SortableTable";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
+import DetailDrawer, { toneOf } from "@/components/DetailDrawer";
 import { downloadCSV } from "@/lib/export";
 import { loadMegaPrefs, megaWeightsLabel, activeMegaWeights, type MegaPrefs } from "@/lib/mega-prefs";
-import { MEGA_BUY_ABOVE, MEGA_SELL_BELOW } from "@/lib/mega-indicator";
+import { MEGA_BASELINE, explainBaseline, isMegaBaseline } from "@/lib/mega-indicator";
 import type { BacktestOutput } from "@/lib/backtest-engine";
 import StrategyCompare from "./StrategyCompare";
 import ParamOptimizer from "./ParamOptimizer";
@@ -68,6 +69,9 @@ export default function StockBacktest() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestOutput | null>(null);
+  // Trade opened from the Trade Log — its drawer shows the exact dates and the
+  // Mega Score on the entry/exit day.
+  const [tradeDetail, setTradeDetail] = useState<BacktestOutput["trades"][number] | null>(null);
   const [mode, setMode] = useState<Mode>("single");
 
   useEffect(() => {
@@ -102,11 +106,21 @@ export default function StockBacktest() {
         (p) => !(selected.id === "mega_score" && (p.key === "entry" || p.key === "exit"))
       )
     : [];
-
   const changeStrategy = (id: string) => {
     setStrategyId(id);
     const def = catalog.find(s => s.id === id);
     if (def) setParams(def.defaults);
+  };
+
+  // ── Mega Score baseline bands (the strategy's whole buy/sell rule) ──
+  const entryScore = Number.isFinite(params.entry) ? params.entry : MEGA_BASELINE.entry;
+  const exitScore = Number.isFinite(params.exit) ? params.exit : MEGA_BASELINE.exit;
+  const baseline = explainBaseline(entryScore, exitScore);
+  const onBaseline = isMegaBaseline(entryScore, exitScore);
+  const bandInvalid = strategyId === "mega_score" && baseline.error !== null;
+  const setBand = (key: "entry" | "exit", raw: number) => {
+    const v = Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.round(raw))) : 0;
+    setParams(prev => ({ ...prev, [key]: v }));
   };
 
   const run = useCallback(async (overrides?: { strategyId?: string; params?: Record<string, number> }) => {
@@ -182,20 +196,73 @@ export default function StockBacktest() {
     }));
   }, [result, tradeMarkerDates]);
   const hasMega = !!result?.priceSeries.some(p => p.mega != null);
+  // Thresholds the LAST run actually used (not the live inputs, which may have
+  // been edited since): draw them on the score axis so crossings are visible.
+  const megaBands = result && result.strategyId === "mega_score"
+    ? {
+        entry: Number(result.config.params?.entry ?? MEGA_BASELINE.entry),
+        exit: Number(result.config.params?.exit ?? MEGA_BASELINE.exit),
+      }
+    : null;
   const monthlyData = useMemo(
     () => (result ? result.monthlyReturns.map(m => ({ month: m.month, ret: Math.round(m.ret * 10) / 10 })) : []),
     [result]
   );
 
+  // Mega Score at a trade date, coloured by the run's own buy/sell bands.
+  const scoreTone = (v: number | null | undefined): "pos" | "neg" | "muted" | undefined => {
+    if (v == null) return "muted";
+    if (!megaBands) return undefined;
+    return v >= megaBands.entry ? "pos" : v <= megaBands.exit ? "neg" : "muted";
+  };
+  // The signal reading is smoothed on the Mega Score strategy; name the window
+  // so the number in the log is traceable to the rule that used it.
+  const signalSmoothDays = result?.strategyId === "mega_score"
+    ? Math.max(1, Math.round(Number(result.config.params?.smooth ?? 5)))
+    : 1;
+  const signalWindow = signalSmoothDays > 1 ? `SMA-${signalSmoothDays}` : "raw";
+  const scoreText = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(1));
+  const scoreCell = (v: number | null | undefined) => {
+    const tone = scoreTone(v);
+    const cls = tone === "pos" ? "text-[var(--success)]" : tone === "neg" ? "text-[var(--danger)]" : "text-[var(--muted)]";
+    return <span className={`tabular-nums ${v == null ? "" : cls}`}>{scoreText(v)}</span>;
+  };
+  // "Monday, 3 Jan 2022" — the exact session a fill happened on.
+  const longDate = (d: string | null | undefined) => {
+    if (!d) return "—";
+    const dt = new Date(`${d}T00:00:00`);
+    return Number.isNaN(dt.getTime())
+      ? d
+      : dt.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "short", day: "numeric" });
+  };
+
   const tradeColumns: Column<BacktestOutput["trades"][number]>[] = [
     { key: "id", header: "#", render: r => r.id },
-    { key: "entryDate", header: "Entry" },
+    {
+      key: "entryDate", header: "Entry",
+      // Clicking the log row (or this date) opens the trade detail.
+      render: r => (
+        <span className="underline decoration-dotted underline-offset-2 decoration-[var(--muted)]">
+          {r.entryDate}
+        </span>
+      ),
+    },
     {
       key: "exitDate", header: "Exit", render: r => r.exitDate
         ? r.exitDate
         : <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">OPEN</span>,
     },
     { key: "bars", header: "Days", align: "right" },
+    {
+      key: "entryScore", header: "Score in (signal)", align: "right",
+      render: r => (
+        <span className="whitespace-nowrap">
+          {scoreCell(r.entryScore)}
+          {r.reentry && <span title="Re-opened after a stop/target while the regime stayed long" className="ml-0.5 text-[10px] text-[var(--muted)]">↻</span>}
+        </span>
+      ),
+    },
+    { key: "exitScore", header: "Score out (signal)", align: "right", render: r => scoreCell(r.exitScore) },
     { key: "shares", header: "Shares", align: "right", render: r => num(r.shares) },
     { key: "entryPrice", header: "Entry $", align: "right", render: r => fmt2(r.entryPrice) },
     { key: "exitPrice", header: "Exit $", align: "right", render: r => (r.exitPrice == null ? "—" : fmt2(r.exitPrice)) },
@@ -350,8 +417,13 @@ export default function StockBacktest() {
                 Min trades <span className="opacity-60">(0 = no minimum)</span>
               </label>
               <input type="number" value={minTrades} min={0} max={10000} onChange={(e) => setMinTrades(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
-                title="Warn when the run closes fewer trades than this — a short sample is not proof of an edge."
+                title="Quality floor: the run is flagged when it closes fewer trades than this, and the optimizer / walk-forward keep anything below it out of the best picks."
                 className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+              {minTrades > 0 && maxTrades > 0 && minTrades > maxTrades && (
+                <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                  Higher than the max-trades cap ({maxTrades}) — this floor can never be met.
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-xs text-[var(--muted)] mb-1">
@@ -367,9 +439,100 @@ export default function StockBacktest() {
           </div>
         </div>
 
+        {/* ── Mega Score baseline: the buy/sell rule, in one clear place ── */}
+        {strategyId === "mega_score" && (
+          <div className="mt-4 p-4 rounded-xl border border-indigo-500/40" style={{ background: "var(--input-bg)" }}>
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-sm font-semibold">🎯 Mega Score baseline — when to buy, when to sell</h3>
+              <span className={`text-[11px] ${onBaseline ? "text-[var(--muted)]" : "text-indigo-600 dark:text-indigo-400 font-medium"}`}>
+                {onBaseline
+                  ? `Baseline (${MEGA_BASELINE.entry} / ${MEGA_BASELINE.exit}) — unchanged`
+                  : `Custom bands — baseline is ${MEGA_BASELINE.entry} / ${MEGA_BASELINE.exit}`}
+              </span>
+            </div>
+            <p className="text-[11px] text-[var(--muted)] mt-1">
+              The composite Mega Score runs 0–100. These two numbers are the entire buy/sell rule for the Mega Score
+              Regime strategy: the entry score starts a position, the exit score ends it.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+              <div>
+                <label htmlFor="mega-entry-score" className="block text-xs font-medium mb-1">
+                  Entry score <span className="text-[var(--muted)] font-normal">— buy at or above</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="mega-entry-score"
+                    type="number" min={1} max={99} step={1}
+                    value={entryScore}
+                    onChange={(e) => setBand("entry", Number(e.target.value))}
+                    className="w-24 px-2 py-1.5 bg-[var(--card)] border border-[var(--input-border)] rounded text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                  <span className="text-[10px] text-[var(--muted)]">baseline {MEGA_BASELINE.entry}</span>
+                </div>
+                <p className="text-[11px] text-[var(--muted)] leading-relaxed mt-1.5">{baseline.entry}</p>
+              </div>
+              <div>
+                <label htmlFor="mega-exit-score" className="block text-xs font-medium mb-1">
+                  Exit score <span className="text-[var(--muted)] font-normal">— sell at or below</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="mega-exit-score"
+                    type="number" min={1} max={99} step={1}
+                    value={exitScore}
+                    onChange={(e) => setBand("exit", Number(e.target.value))}
+                    className="w-24 px-2 py-1.5 bg-[var(--card)] border border-[var(--input-border)] rounded text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+                  <span className="text-[10px] text-[var(--muted)]">baseline {MEGA_BASELINE.exit}</span>
+                </div>
+                <p className="text-[11px] text-[var(--muted)] leading-relaxed mt-1.5">{baseline.exit}</p>
+              </div>
+            </div>
+
+            {/* The bands on the 0–100 score scale, so the rule is visible at a glance. */}
+            <div className="mt-4">
+              <div className="flex h-6 w-full overflow-hidden rounded-md text-[10px] font-semibold">
+                <div
+                  style={{ width: `${Math.max(0, Math.min(100, exitScore))}%` }}
+                  className="flex items-center justify-center whitespace-nowrap bg-rose-500/25 text-rose-700 dark:text-rose-300">
+                  {exitScore > 12 ? `SELL ≤ ${exitScore}` : ""}
+                </div>
+                <div
+                  style={{ width: `${Math.max(0, entryScore - exitScore)}%` }}
+                  className="flex items-center justify-center whitespace-nowrap bg-amber-400/20 text-amber-700 dark:text-amber-300">
+                  {entryScore - exitScore > 14 ? `HOLD ${exitScore}–${entryScore}` : ""}
+                </div>
+                <div
+                  style={{ width: `${Math.max(0, 100 - entryScore)}%` }}
+                  className="flex items-center justify-center whitespace-nowrap bg-emerald-500/25 text-emerald-700 dark:text-emerald-300">
+                  {100 - entryScore > 12 ? `BUY ≥ ${entryScore}` : ""}
+                </div>
+              </div>
+              <div className="flex justify-between text-[10px] text-[var(--muted)] mt-1">
+                <span>score 0</span><span>50</span><span>100</span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-[var(--muted)] leading-relaxed mt-3">{baseline.hold}</p>
+
+            {baseline.error && (
+              <p className="mt-2 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                ⚠ {baseline.error} The backtest will not run until the bands are fixed.
+              </p>
+            )}
+
+            <button
+              onClick={() => setParams(prev => ({ ...prev, entry: MEGA_BASELINE.entry, exit: MEGA_BASELINE.exit }))}
+              disabled={onBaseline}
+              className="mt-3 px-2.5 py-1.5 text-[11px] rounded border border-[var(--input-border)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] disabled:opacity-40 disabled:cursor-not-allowed">
+              ↺ Reset to baseline ({MEGA_BASELINE.entry} / {MEGA_BASELINE.exit})
+            </button>
+          </div>
+        )}
+
         {/* Mega Indicator weights bridge (only relevant to the Mega Score strategy) */}
         {strategyId === "mega_score" && (
           <div className="mt-3 p-3 rounded-lg flex flex-wrap items-center gap-x-4 gap-y-2" style={{ background: "var(--input-bg)" }}>
+            <span className="text-[11px] font-semibold">Composite weights</span>
             <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
               <input type="checkbox" checked={useMegaPrefs} onChange={(e) => setUseMegaPrefs(e.target.checked)} className="accent-indigo-500" />
               <span>Use my saved Mega Indicator weights</span>
@@ -383,39 +546,6 @@ export default function StockBacktest() {
                 strategy + chart overlay will use them
               </span>
             )}
-
-            {/* Base score: the score levels that trigger buy and sell. */}
-            <div className="w-full flex flex-wrap items-end gap-4 pt-3 border-t border-[var(--card-border)]">
-              <div>
-                <label className="block text-[10px] text-[var(--muted)] mb-1">Buy when score ≥</label>
-                <input
-                  type="number" min={10} max={90} step={1}
-                  value={params.entry ?? MEGA_BUY_ABOVE}
-                  onChange={(e) => setParams(prev => ({ ...prev, entry: Number(e.target.value) }))}
-                  className="w-24 px-2 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-[10px] text-[var(--muted)] mb-1">Sell when score ≤</label>
-                <input
-                  type="number" min={5} max={85} step={1}
-                  value={params.exit ?? MEGA_SELL_BELOW}
-                  onChange={(e) => setParams(prev => ({ ...prev, exit: Number(e.target.value) }))}
-                  className="w-24 px-2 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <button
-                onClick={() => setParams(prev => ({ ...prev, entry: MEGA_BUY_ABOVE, exit: MEGA_SELL_BELOW }))}
-                className="px-2 py-1.5 text-[10px] rounded border border-[var(--input-border)] text-[var(--muted)] hover:text-[var(--foreground)]">
-                Reset to baseline ({MEGA_BUY_ABOVE} / {MEGA_SELL_BELOW})
-              </button>
-              <span className="text-[11px] text-[var(--muted)] basis-full">
-                Base score: the Mega Indicator baseline is buy ≥ {MEGA_BUY_ABOVE}, sell ≤ {MEGA_SELL_BELOW}. Buy must be at or above sell.
-              </span>
-              {(params.entry ?? MEGA_BUY_ABOVE) < (params.exit ?? MEGA_SELL_BELOW) && (
-                <span className="text-[11px] text-amber-500 dark:text-amber-400 basis-full">
-                  ⚠ Buy threshold is below sell — raise buy or lower sell, or the position will flip on noise.
-                </span>
-              )}
-            </div>
           </div>
         )}
 
@@ -444,7 +574,8 @@ export default function StockBacktest() {
         )}
 
         <div className="mt-4 flex items-center gap-3">
-          <button onClick={() => run()} disabled={running || !ticker || !strategyId}
+          <button onClick={() => run()} disabled={running || !ticker || !strategyId || bandInvalid}
+            title={bandInvalid ? baseline.error ?? undefined : undefined}
             className="px-5 py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-500 disabled:opacity-50 transition-colors">
             {running ? "Running backtest…" : "▶ Run Backtest"}
           </button>
@@ -469,6 +600,19 @@ export default function StockBacktest() {
           {result.warnings.length > 0 && (
             <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs">
               {result.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+            </div>
+          )}
+
+          {/* Min-trades quality floor, stated as a pass/fail rather than a footnote. */}
+          {result.minTrades !== null && (
+            <div className={`p-3 rounded-lg border text-xs ${
+              result.meetsMinTrades
+                ? "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400"
+                : "bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400"
+            }`}>
+              {result.meetsMinTrades
+                ? `✓ Quality floor met — ${s.totalTrades} closed trade${s.totalTrades === 1 ? "" : "s"} against your minimum of ${result.minTrades}.`
+                : `⚠ Below your minimum — this run closed ${s.totalTrades} trade${s.totalTrades === 1 ? "" : "s"}, ${result.minTrades - s.totalTrades} short of ${result.minTrades}. Lower the entry score, raise the exit score or use a longer history for more trades; until then read these ratios as indicative.`}
             </div>
           )}
 
@@ -533,6 +677,12 @@ export default function StockBacktest() {
                 <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-amber-500 inline-block" /> SMA 50</span>
                 <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-green-500 inline-block" /> SMA 200</span>
                 {hasMega && <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-fuchsia-500 inline-block" /> Mega Score (0-100)</span>}
+                {megaBands && (
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-0.5 bg-emerald-500 inline-block" /> Buy ≥ {megaBands.entry}
+                    <span className="w-3 h-0.5 bg-red-500 inline-block ml-1" /> Sell ≤ {megaBands.exit}
+                  </span>
+                )}
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Trade marker</span>
               </div>
             }
@@ -553,13 +703,20 @@ export default function StockBacktest() {
                 {hasMega && (
                   <Line yAxisId="mega" type="monotone" dataKey="mega" stroke="#d946ef" strokeWidth={1.5} dot={false} name="Mega Score" connectNulls strokeDasharray="2 2" />
                 )}
+                {megaBands && (
+                  <>
+                    <ReferenceLine yAxisId="mega" y={megaBands.entry} stroke="#22c55e" strokeDasharray="4 4" strokeOpacity={0.85} />
+                    <ReferenceLine yAxisId="mega" y={megaBands.exit} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.85} />
+                  </>
+                )}
                 <Scatter yAxisId="price" dataKey="entryMarker" fill="#34d399" shape="triangle" isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
             {hasMega && (
               <p className="text-[10px] text-[var(--muted)] mt-2">
                 {result.megaScoreDescription}
-                {result.config.megaWeights && strategyId === "mega_score" && useMegaPrefs ? " · matching your Mega Indicator weights" : ""}
+                {result.config.megaWeights && result.strategyId === "mega_score" && useMegaPrefs ? " · matching your Mega Indicator weights" : ""}
+                {megaBands ? ` · traded at buy ≥ ${megaBands.entry}, sell ≤ ${megaBands.exit}` : ""}
               </p>
             )}
           </ChartPanel>
@@ -608,13 +765,14 @@ export default function StockBacktest() {
           <ChartPanel
             id="trades"
             title={`Trade Log (${result.trades.length} trades)`}
+            subtitle="Click a trade for its exact entry/exit days and the Mega Score on each"
             className="xl:col-span-2"
             right={
               <button onClick={() => {
                 downloadCSV(
                   `backtest-${result.symbol}-${result.strategyId}.csv`,
-                  ["#", "Entry Date", "Exit Date", "Days", "Shares", "Entry $", "Exit $", "Return %", "P&L", "Exit Reason"],
-                  result.trades.map(t => [t.id, t.entryDate, t.exitDate || "OPEN", t.bars, t.shares, t.entryPrice, t.exitPrice || "", t.returnPct, t.pnl, t.reason]),
+                  ["#", "Entry Date", "Exit Date", "Days", "Score In", "Score In (fill day)", "Score Out", "Score Out (fill day)", "Shares", "Entry $", "Exit $", "Return %", "P&L", "Exit Reason"],
+                  result.trades.map(t => [t.id, t.entryDate, t.exitDate || "OPEN", t.bars, t.entryScore ?? "", t.entryFillScore ?? "", t.exitScore ?? "", t.exitFillScore ?? "", t.shares, t.entryPrice, t.exitPrice || "", t.returnPct, t.pnl, t.reason]),
                 );
               }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] rounded-lg hover:bg-[var(--card-hover)] border border-[var(--card-border)] transition-colors">
@@ -630,11 +788,139 @@ export default function StockBacktest() {
               searchKey="entryDate"
               emptyMessage="No trades were generated"
               rowKey={(r) => r.id}
+              onRowClick={(r) => setTradeDetail(r)}
             />
           </ChartPanel>
           </PanelBoard>
         </>
       )}
+
+      {/* ── Trade detail: exact days + Mega Score at entry/exit ── */}
+      <DetailDrawer
+        open={tradeDetail !== null}
+        onClose={() => setTradeDetail(null)}
+        title={tradeDetail ? `Trade #${tradeDetail.id} · ${result?.symbol ?? ticker}` : "Trade"}
+        subtitle={tradeDetail ? `${result?.strategyName ?? strategyId} · ${tradeDetail.side}` : undefined}
+        badges={
+          tradeDetail ? (
+            <>
+              <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-[var(--card-hover)] text-[var(--muted)]">
+                {tradeDetail.exitDate ? `${tradeDetail.bars} days held` : "still open"}
+              </span>
+              {tradeDetail.entryScore != null && (
+                <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 text-indigo-500 dark:text-indigo-400">
+                  Mega Score {tradeDetail.entryScore.toFixed(1)} in
+                  {tradeDetail.exitScore != null ? ` → ${tradeDetail.exitScore.toFixed(1)} out` : ""}
+                </span>
+              )}
+            </>
+          ) : undefined
+        }
+        sections={
+          tradeDetail
+            ? [
+                {
+                  heading: "Entry",
+                  rows: [
+                    { label: "Exact day (fill)", value: longDate(tradeDetail.entryDate) },
+                    {
+                      label: `Mega Score at entry signal (${signalWindow}, prior close)`,
+                      value: scoreText(tradeDetail.entryScore),
+                      tone: scoreTone(tradeDetail.entryScore),
+                    },
+                    {
+                      label: "Why this entry",
+                      value: tradeDetail.reentry
+                        ? "Re-opened after a stop/target while the regime stayed long — no fresh score crossing"
+                        : "Score crossed the buy band",
+                      tone: "muted",
+                    },
+                    {
+                      label: "Mega Score on fill day's close",
+                      value: scoreText(tradeDetail.entryFillScore),
+                      tone: scoreTone(tradeDetail.entryFillScore),
+                    },
+                    { label: "Fill price", value: fmt2(tradeDetail.entryPrice) },
+                    { label: "Shares", value: num(tradeDetail.shares) },
+                  ],
+                },
+                {
+                  heading: "Exit",
+                  rows: tradeDetail.exitDate
+                    ? [
+                        { label: "Exact day (fill)", value: longDate(tradeDetail.exitDate) },
+                        ...(tradeDetail.reason === "signal"
+                          ? [
+                              {
+                                label: `Mega Score at exit signal (${signalWindow}, prior close)`,
+                                value: scoreText(tradeDetail.exitScore),
+                                tone: scoreTone(tradeDetail.exitScore),
+                              },
+                              {
+                                label: "Mega Score on fill day's close",
+                                value: scoreText(tradeDetail.exitFillScore),
+                                tone: scoreTone(tradeDetail.exitFillScore),
+                              },
+                            ]
+                          : tradeDetail.reason === "end-of-test"
+                          ? [{
+                              label: "Mega Score on the last bar",
+                              value: scoreText(tradeDetail.exitFillScore),
+                              tone: "muted" as const,
+                            }]
+                          : [{
+                              label: "Mega Score on exit day (intra-bar fill)",
+                              value: scoreText(tradeDetail.exitScore),
+                              tone: scoreTone(tradeDetail.exitScore),
+                            }]),
+                        { label: "Fill price", value: tradeDetail.exitPrice == null ? "—" : fmt2(tradeDetail.exitPrice) },
+                        {
+                          label: "Exit reason",
+                          value: tradeDetail.reason === "stop-loss" ? "Stop-loss"
+                            : tradeDetail.reason === "take-profit" ? "Take-profit target"
+                            : tradeDetail.reason === "end-of-test" ? "Closed at end of test"
+                            : "Strategy signal",
+                        },
+                      ]
+                    : [
+                        { label: "Exact day", value: "Still open at the end of the test", tone: "muted" as const },
+                        {
+                          label: "Mega Score on the last bar",
+                          value: scoreText(result?.priceSeries[result.priceSeries.length - 1]?.mega),
+                          tone: "muted" as const,
+                        },
+                      ],
+                },
+                {
+                  heading: "Result",
+                  rows: [
+                    { label: "P&L", value: fmt2(tradeDetail.pnl), tone: toneOf(tradeDetail.pnl) },
+                    { label: "Return", value: pct(tradeDetail.returnPct, 2), tone: toneOf(tradeDetail.returnPct) },
+                  ],
+                },
+                ...(megaBands
+                  ? [{
+                      heading: "Score bands this run traded",
+                      rows: [
+                        { label: "Buy when score ≥", value: megaBands.entry.toFixed(0) },
+                        { label: "Sell when score ≤", value: megaBands.exit.toFixed(0) },
+                      ],
+                    }]
+                  : []),
+              ]
+            : []
+        }
+      >
+        {tradeDetail && (
+          <p className="text-xs text-[var(--muted)] leading-relaxed">
+            The signal score is the Mega Score reading that generated the trade ({signalWindow} of the same
+            look-ahead-safe series plotted under the price chart) — that is the number the buy/sell bands are
+            compared against. Signals fill at the next session&apos;s open, and the fill day&apos;s own close is
+            shown beside it because the score can move overnight.
+            {tradeDetail.entryScore == null && " This run did not compute the score series (bulk compare/optimize runs skip it)."}
+          </p>
+        )}
+      </DetailDrawer>
     </div>
   );
 }

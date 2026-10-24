@@ -23,6 +23,7 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
   const [strategyId, setStrategyId] = useState("sma_cross");
   const [trainYears, setTrainYears] = useState(3);
   const [testYears, setTestYears] = useState(1);
+  const [minTrades, setMinTrades] = useState(0);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<WalkForwardResult | null>(null);
@@ -48,7 +49,7 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
       const res = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "walkForward", symbol: ticker, strategyId: effectiveStrategyId, trainYears, testYears, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
+        body: JSON.stringify({ action: "walkForward", symbol: ticker, strategyId: effectiveStrategyId, trainYears, testYears, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Walk-forward failed");
@@ -97,7 +98,15 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
       render: r => <span className={r.testReturnPct >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>{pct(r.testReturnPct)}</span>,
     },
     { key: "testMaxDrawdownPct", header: "OOS Max DD", align: "right", render: r => pct(-r.testMaxDrawdownPct) },
-    { key: "testTrades", header: "Trades", align: "right" },
+    {
+      key: "testTrades", header: "Trades", align: "right",
+      render: r => (
+        <span className={r.meetsMinTrades ? "" : "text-amber-600 dark:text-amber-400"}
+          title={r.meetsMinTrades ? undefined : `Below the minimum of ${result?.minTrades ?? 0} trades`}>
+          {r.testTrades}{r.meetsMinTrades ? "" : " ⚠"}
+        </span>
+      ),
+    },
     {
       key: "apply", header: "", align: "center",
       render: (r) => onApply && result ? (
@@ -166,6 +175,14 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
                 </button>
               ))}
             </div>
+            <label className="block text-xs text-[var(--muted)] mb-1 mt-3">
+              Min trades <span className="opacity-60">(0 = off)</span>
+            </label>
+            <input
+              type="number" min={0} max={10000} value={minTrades}
+              onChange={(e) => setMinTrades(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+              title="Quality floor: a parameter set that closes fewer trades than this on the training window cannot win a fold."
+              className="w-24 px-2.5 py-1 rounded text-xs font-mono bg-[var(--input-bg)] border border-[var(--input-border)] focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
           </div>
           <div className="lg:col-span-2">
             <label className="block text-xs text-[var(--muted)] mb-1">How to read it</label>

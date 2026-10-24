@@ -22,6 +22,7 @@ import {
 import {
   ALL_SPECS, OPTIONAL_SPECS, actionFor, computeMegaIndicator, defaultWeightFor, defaultWeights,
   effectiveWeight, evenWeights, percentShares,
+  MEGA_BASELINE, explainBaseline, isMegaBaseline,
 } from "../src/lib/mega-indicator";
 import { suggestIndicators, median, MAX_SUGGESTIONS, type SuggestionContext } from "../src/lib/indicator-suggestions";
 import { isEvenWeights } from "../src/lib/mega-prefs";
@@ -560,6 +561,51 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
     // The payload carries the same action the UI derives from the score.
     const res = computeMegaIndicator({ technical, weights: defaultWeights(ALL_SPECS) });
     expect(res.action.key).toBe(actionFor(res.score).key);
+  });
+
+  it("the baseline is the same 65 / 35 the Mega Indicator bands use", () => {
+    expect(MEGA_BASELINE).toEqual({ entry: 65, exit: 35 });
+    expect(actionFor(MEGA_BASELINE.entry).key).toBe("buy");
+    expect(actionFor(MEGA_BASELINE.exit).key).toBe("hold");
+    expect(actionFor(MEGA_BASELINE.exit - 0.1).key).toBe("sell");
+  });
+
+  it("isMegaBaseline only recognizes the untouched bands", () => {
+    expect(isMegaBaseline(65, 35)).toBe(true);
+    expect(isMegaBaseline(64, 35)).toBe(false);
+    expect(isMegaBaseline(65, 36)).toBe(false);
+  });
+
+  it("explainBaseline says what the entry score and the exit score each do", () => {
+    const b = explainBaseline(70, 30);
+    expect(b.bandWidth).toBe(40);
+    expect(b.error).toBeNull();
+    // The entry text has to name the level and say it opens a long position.
+    expect(b.entry).toContain("70");
+    expect(b.entry).toMatch(/open/i);
+    // The exit text has to name its level and say it closes the position.
+    expect(b.exit).toContain("30");
+    expect(b.exit).toMatch(/clos/i);
+    // The hold text states that the gap is the no-trade band.
+    expect(b.hold).toContain("40");
+    expect(b.hold).toMatch(/no-trade band/i);
+    expect(b.summary).toContain("70");
+    expect(b.summary).toContain("30");
+  });
+
+  it("explainBaseline rejects bands whose entry is below the exit", () => {
+    const b = explainBaseline(40, 50);
+    expect(b.bandWidth).toBe(-10);
+    expect(b.error).not.toBeNull();
+    expect(b.error).toMatch(/below exit/i);
+    // A negative gap must never be described as a no-trade band.
+    expect(b.hold).toMatch(/no no-trade band/i);
+    expect(b.hold).not.toContain("-10");
+  });
+
+  it("explainBaseline warns when the no-trade band is too narrow", () => {
+    expect(explainBaseline(66, 64).hold).toMatch(/wobbles/i);
+    expect(explainBaseline(80, 20).hold).toMatch(/wide no-trade zone/i);
   });
 
   it("the payload says which indicators are catalogue ones", () => {

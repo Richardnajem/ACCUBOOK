@@ -324,6 +324,72 @@ export const MEGA_BUY_ABOVE = 65;
 /** Below this the baseline says sell; between the two thresholds it says hold. */
 export const MEGA_SELL_BELOW = 35;
 
+/**
+ * The Mega Score baseline in one object: the entry/exit bands the app
+ * recommends before anyone changes them. The Mega Indicator page's BUY/HOLD/SELL
+ * readout, the backtest's "Mega Score Regime" strategy and the Backtest page's
+ * baseline panel all start — and reset — from these two numbers.
+ */
+export const MEGA_BASELINE = { entry: MEGA_BUY_ABOVE, exit: MEGA_SELL_BELOW } as const;
+
+export type MegaBandKey = "entry" | "exit";
+
+/** True when the bands are the untouched baseline (65 / 35). */
+export function isMegaBaseline(entry: number, exit: number): boolean {
+  return Math.round(entry) === MEGA_BASELINE.entry && Math.round(exit) === MEGA_BASELINE.exit;
+}
+
+export interface BaselineExplanation {
+  /** One-line summary of the bands. */
+  summary: string;
+  /** What the entry score means, in plain language. */
+  entry: string;
+  /** What the exit score means, in plain language. */
+  exit: string;
+  /** What happens between the two bands. */
+  hold: string;
+  /** entry − exit: how wide the no-trade band is. */
+  bandWidth: number;
+  /** Non-null when the pair cannot be traded (entry below exit). */
+  error: string | null;
+}
+
+/**
+ * Explain a pair of Mega Score bands: what the entry score does, what the exit
+ * score does, and what the space between them means. The Backtest page prints
+ * this next to the inputs so "entry score" and "exit score" are never just two
+ * bare numbers, and the strategy description says the same thing in one line.
+ */
+export function explainBaseline(entry: number, exit: number): BaselineExplanation {
+  const e = Number.isFinite(entry) ? Math.round(entry) : MEGA_BASELINE.entry;
+  const x = Number.isFinite(exit) ? Math.round(exit) : MEGA_BASELINE.exit;
+  const bandWidth = e - x;
+
+  const gapNote =
+    bandWidth < 0
+      ? ""
+      : bandWidth < 5
+        ? ` The band is only ${bandWidth} point${bandWidth === 1 ? "" : "s"} wide, so small score wobbles will flip the position in and out.`
+        : bandWidth >= 40
+          ? ` The band is ${bandWidth} points wide — a very wide no-trade zone, so expect few, long-held trades.`
+          : "";
+
+  return {
+    summary: `Buy when the composite is ${e} or above · Sell when it is ${x} or below`,
+    entry: `Entry score (${e}): the composite Mega Score a trade needs to reach before a long position is opened. Once the score is at or above ${e}, the backtest buys on the next day's open. Lower = buys earlier and more often; higher = waits for a stronger technical reading.`,
+    exit: `Exit score (${x}): the level the score has to fall to before an open position is closed — also at the next day's open. Higher = leaves sooner; lower = rides out more weakness.`,
+    hold:
+      bandWidth < 0
+        ? "There is no no-trade band here: with the entry score below the exit score the rule contradicts itself, so nothing sits between buying and selling."
+        : `Between ${x} and ${e} nothing happens: a flat strategy stays flat and an open position stays open. That ${bandWidth}-point gap is the no-trade band that keeps the strategy from flipping on noise.${gapNote}`,
+    bandWidth,
+    error:
+      bandWidth < 0
+        ? `Entry score ${e} is below exit score ${x} — the same reading would be both a buy and a sell. Raise the entry score or lower the exit score.`
+        : null,
+  };
+}
+
 export type MegaActionKey = "buy" | "hold" | "sell";
 
 export interface MegaAction {

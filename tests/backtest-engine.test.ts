@@ -2,11 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   simulateCore,
   resolveCosts,
+  applyTradeFloor,
   type BacktestConfig,
   type ResolvedCosts,
 } from "../src/lib/backtest-engine";
 import type { Bar } from "../src/lib/market-data";
 import { defaultParams, getStrategy, type StrategyDef } from "../src/lib/strategies";
+import { computeMegaScoreSeries } from "../src/lib/mega-score";
+import { sma } from "../src/lib/ta";
 
 // ─── Helpers ────────────────────────────────────────────────────
 const META = { symbol: "TEST", name: "Test Corp", currency: "USD", exchange: "SYNTH" };
@@ -291,6 +294,64 @@ describe("simulateCore: trade limits", () => {
     expect(out.trades).toHaveLength(runWith().trades.length);
     expect(out.warnings.some((w) => w.includes("Entry limit") || w.includes("minimum"))).toBe(false);
   });
+
+  it("reports the min-trades floor and whether the run met it", () => {
+    const unlimited = runWith();
+    expect(unlimited.minTrades).toBeNull();
+    expect(unlimited.meetsMinTrades).toBe(true);
+
+    const met = runWith({ minTrades: 2 });
+    expect(met.minTrades).toBe(2);
+    expect(met.meetsMinTrades).toBe(true);
+
+    const missed = runWith({ minTrades: 50 });
+    expect(missed.minTrades).toBe(50);
+    expect(missed.summary.totalTrades).toBeLessThan(50);
+    expect(missed.meetsMinTrades).toBe(false);
+  });
+});
+
+// ─── Min-trades floor shared by the optimizer and walk-forward ──
+describe("applyTradeFloor", () => {
+  const candidates = [
+    { name: "two", totalTrades: 2 },
+    { name: "eight", totalTrades: 8 },
+    { name: "twenty", totalTrades: 20 },
+  ];
+  const tradesOf = (c: { totalTrades: number }) => c.totalTrades;
+
+  it("drops every candidate below the floor from the ranking pool", () => {
+    const out = applyTradeFloor(candidates, 8, tradesOf);
+    expect(out.pool.map((c) => c.name)).toEqual(["eight", "twenty"]);
+    expect(out.belowFloor).toBe(1);
+    expect(out.usedFallback).toBe(false);
+    expect(out.warning).toContain("1 of 3 candidates");
+    expect(out.warning).toContain("8 trades");
+  });
+
+  it("keeps everything when no floor is set", () => {
+    for (const floor of [0, undefined, null]) {
+      const out = applyTradeFloor(candidates, floor, tradesOf);
+      expect(out.pool).toHaveLength(3);
+      expect(out.belowFloor).toBe(0);
+      expect(out.usedFallback).toBe(false);
+      expect(out.warning).toBeNull();
+    }
+  });
+
+  it("is silent when every candidate clears the floor", () => {
+    const out = applyTradeFloor(candidates, 2, tradesOf);
+    expect(out.pool).toHaveLength(3);
+    expect(out.warning).toBeNull();
+  });
+
+  it("falls back to all candidates, and says so, when nothing clears the floor", () => {
+    const out = applyTradeFloor(candidates, 50, tradesOf);
+    expect(out.pool).toHaveLength(3);
+    expect(out.belowFloor).toBe(3);
+    expect(out.usedFallback).toBe(true);
+    expect(out.warning).toContain("ignore your minimum-trades floor");
+  });
 });
 
 // ─── Mega Score strategy: configurable base buy/sell score ──────
@@ -323,5 +384,186 @@ describe("Mega Score strategy base score", () => {
     });
     expect(pos).toHaveLength(closes.length);
     for (const p of pos) expect([0, 1]).toContain(p);
+  });
+});
+
+// ─── Mega Score Regime: the thresholds really gate the signals ──
+describe("Mega Score Regime signal semantics", () => {
+  const strategy = getStrategy("mega_score") as StrategyDef;
+  const closes = Array.from({ length: 420 }, (_, i) => 100 + i * 0.06 + Math.sin(i / 7) * 9);
+  const bars = makeBars(closes);
+  const ctx = {
+    open: bars.map((b) => b.open),
+    high: bars.map((b) => b.high),
+    low: bars.map((b) => b.low),
+    close: closes,
+    volume: bars.map((b) => b.volume),
+  };
+  const score = computeMegaScoreSeries(ctx).score;
+  const positions = (entry: number, exit: number, smooth = 5) =>
+    strategy.generate({ ...ctx, params: { entry, exit, smooth } });
+  const smoothed = sma(score, 5);
+
+  it("only enters at or above the buy level and exits at or below the sell level", () => {
+    const pos = positions(65, 35);
+    let entries = 0;
+    let exits = 0;
+    for (let i = 0; i < pos.length; i++) {
+      const prev = i === 0 ? 0 : pos[i - 1];
+      if (pos[i] === 1 && prev === 0) {
+        expect(smoothed[i], `entered at bar ${i} on score ${smoothed[i]}`).toBeGreaterThanOrEqual(65);
+        entries++;
+      }
+      if (pos[i] === 0 && prev === 1) {
+        expect(smoothed[i], `exited at bar ${i} on score ${smoothed[i]}`).toBeLessThanOrEqual(35);
+        exits++;
+      }
+      // Holding means the score has not reached the sell level.
+      if (pos[i] === 1) expect(smoothed[i]).toBeGreaterThan(35);
+    }
+    expect(entries).toBeGreaterThan(0);
+    expect(exits).toBeGreaterThan(0);
+  });
+
+  it("a higher buy level can only enter later, never earlier", () => {
+    const loose = positions(55, 35);
+    const strict = positions(80, 35);
+    for (let i = 0; i < loose.length; i++) {
+      expect(strict[i], `bar ${i}`).toBeLessThanOrEqual(loose[i]);
+    }
+    expect(strict.reduce((s, v) => s + v, 0)).toBeLessThan(loose.reduce((s, v) => s + v, 0));
+  });
+
+  it("a higher sell level can only leave earlier, never later", () => {
+    const patient = positions(65, 20);
+    const jumpy = positions(65, 50);
+    for (let i = 0; i < patient.length; i++) {
+      expect(jumpy[i], `bar ${i}`).toBeLessThanOrEqual(patient[i]);
+    }
+    expect(jumpy.reduce((s, v) => s + v, 0)).toBeLessThan(patient.reduce((s, v) => s + v, 0));
+  });
+
+  it("smoothing is trailing: the position on a bar never depends on later bars", () => {
+    // Recompute the signal through bar k with the same prefix of the score
+    // series. A trailing SMA can only use values at or before k.
+    const full = positions(65, 35);
+    const k = 300;
+    const prefixScore = score.slice(0, k + 1);
+    const prefixSmooth = sma(prefixScore, 5);
+    let inPos = false;
+    for (let i = 0; i <= k; i++) {
+      if (Number.isFinite(prefixSmooth[i])) {
+        if (!inPos && prefixSmooth[i] >= 65) inPos = true;
+        else if (inPos && prefixSmooth[i] <= 35) inPos = false;
+      }
+      expect(full[i], `bar ${i}`).toBe(inPos ? 1 : 0);
+    }
+  });
+});
+
+// ─── Trade log: exact days + the Mega Score on entry/exit ───────
+describe("trade log annotations", () => {
+  const closes = Array.from({ length: 420 }, (_, i) => 100 + i * 0.06 + Math.sin(i / 7) * 9);
+  const bars = makeBars(closes).map((b, i) => ({
+    ...b,
+    // makeBars reuses a January day number; keep dates unique for the lookup below.
+    date: `2023-${String(Math.floor(i / 28) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`,
+  }));
+  const strategy = getStrategy("mega_score") as StrategyDef;
+  const config = baseConfig({ strategyId: "mega_score", params: { entry: 65, exit: 35, smooth: 5 } });
+  const costs = resolveCosts(config);
+  const out = simulateCore(bars, META, "cache", strategy, costs, config, true);
+  const dateIndex = new Map(bars.map((b, i) => [b.date, i]));
+  const mega = computeMegaScoreSeries({
+    open: bars.map((b) => b.open),
+    high: bars.map((b) => b.high),
+    low: bars.map((b) => b.low),
+    close: closes,
+    volume: bars.map((b) => b.volume),
+  }).score;
+  // The strategy trades the 5-day smoothed score, so that is the reading the
+  // log must report at the signal bar.
+  const smooth5 = sma(mega, 5);
+
+  it("produces trades to annotate", () => {
+    expect(out.trades.length).toBeGreaterThan(0);
+  });
+
+  it("records the score that triggered each fill and the fill day's own score", () => {
+    for (const t of out.trades) {
+      const ei = dateIndex.get(t.entryDate);
+      expect(ei, `entry date ${t.entryDate} is a real bar`).toBeTypeOf("number");
+      // The trigger is the previous close (the signal bar), which is what the
+      // buy band is compared against; the fill-day close is reported beside it.
+      expect(t.entryScore).toBeCloseTo(Math.round(smooth5[ei! - 1] * 10) / 10, 6);
+      expect(t.entryScore!).toBeGreaterThanOrEqual(65);
+      expect(t.entryFillScore).toBeCloseTo(Math.round(mega[ei!] * 10) / 10, 6);
+
+      if (t.exitDate) {
+        const xi = dateIndex.get(t.exitDate);
+        expect(xi, `exit date ${t.exitDate} is a real bar`).toBeTypeOf("number");
+        expect(t.exitFillScore).toBeCloseTo(Math.round(mega[xi!] * 10) / 10, 6);
+        if (t.reason === "signal") {
+          expect(t.exitScore).toBeCloseTo(Math.round(smooth5[xi! - 1] * 10) / 10, 6);
+          expect(t.exitScore!).toBeLessThanOrEqual(35);
+        } else if (t.reason === "end-of-test") {
+          // Nothing scored the close-out, so there is no signal reading.
+          expect(t.exitScore ?? null).toBeNull();
+        } else {
+          // Stops/targets fire intra-bar: the exit day itself is the reading.
+          expect(t.exitScore).toBeCloseTo(Math.round(mega[xi!] * 10) / 10, 6);
+        }
+      } else {
+        expect(t.exitScore ?? null).toBeNull();
+        expect(t.exitFillScore ?? null).toBeNull();
+      }
+    }
+  });
+
+  it("keeps the log date and the chart's score series in step", () => {
+    const plotted = new Map(out.priceSeries.map((p) => [p.date, p.mega]));
+    for (const t of out.trades) expect(plotted.get(t.entryDate)).toBeCloseTo(t.entryFillScore!, 6);
+  });
+
+  it("leaves the scores off when the score series is skipped (bulk runs)", () => {
+    const bulk = simulateCore(bars, META, "cache", strategy, costs, config, false);
+    for (const t of bulk.trades) expect(t.entryScore ?? t.entryFillScore ?? null).toBeNull();
+  });
+});
+
+describe("trade log: stop-loss re-entries are flagged", () => {
+  const closes = Array.from({ length: 420 }, (_, i) => 100 + i * 0.06 + Math.sin(i / 7) * 9);
+  const bars = makeBars(closes).map((b, i) => ({
+    ...b,
+    date: `2023-${String(Math.floor(i / 28) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`,
+  }));
+  const strategy = getStrategy("mega_score") as StrategyDef;
+  // A tight stop forces intra-bar exits while the regime is still long; the bar
+  // after each one re-buys without a fresh score crossing.
+  const config = baseConfig({
+    strategyId: "mega_score",
+    params: { entry: 65, exit: 35, smooth: 5 },
+    stopLossPct: 3,
+  });
+  const out = simulateCore(bars, META, "cache", strategy, resolveCosts(config), config, true);
+
+  it("marks the entry after a stop as a re-entry", () => {
+    const stops = out.trades.filter((t) => t.reason === "stop-loss");
+    expect(stops.length).toBeGreaterThan(0);
+    const reentries = out.trades.filter((t) => t.reentry);
+    expect(reentries.length).toBeGreaterThan(0);
+    // Every re-entry is on the bar right after a stop, and it is not the first.
+    for (const t of reentries) {
+      expect(t.id).toBeGreaterThan(1);
+      const prev = out.trades.find((p) => p.id === t.id - 1)!;
+      expect(prev.reason).toBe("stop-loss");
+    }
+  });
+
+  it("still reports a real score on each of them", () => {
+    for (const t of out.trades.filter((x) => x.reentry)) {
+      expect(t.entryScore == null).toBe(false);
+      expect(t.entryFillScore == null).toBe(false);
+    }
   });
 });

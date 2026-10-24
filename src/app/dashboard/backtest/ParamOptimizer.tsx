@@ -35,6 +35,7 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
   const [ticker, setTicker] = useState("AAPL");
   const [strategyId, setStrategyId] = useState("sma_cross");
   const [years, setYears] = useState(10);
+  const [minTrades, setMinTrades] = useState(0);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<OptimizeResult | null>(null);
@@ -61,7 +62,7 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
       const res = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "optimizeStrategy", symbol: ticker, strategyId: effectiveStrategyId, years, initialCapital: 100000, commissionBps: 2, slippageBps: 2, positionPct: 100, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
+        body: JSON.stringify({ action: "optimizeStrategy", symbol: ticker, strategyId: effectiveStrategyId, years, initialCapital: 100000, commissionBps: 2, slippageBps: 2, positionPct: 100, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Optimization failed");
@@ -110,6 +111,10 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
   const comboLabel = (params: Record<string, number>) =>
     Object.entries(params).map(([k, v]) => `${paramLabel(k)}: ${v}`).join(" · ");
 
+  const selectedPoint = result && selected
+    ? result.points.find(p => JSON.stringify(p.params) === JSON.stringify(selected)) ?? null
+    : null;
+
   const comboCard = (title: string, p: OptimizePoint | null, highlight: boolean) => {
     if (!p) return null;
     return (
@@ -126,6 +131,11 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
           <span className={p.totalReturnPct >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>{pct(p.totalReturnPct)}</span>
           <span className="text-[var(--muted)]">DD {pct(-p.maxDrawdownPct)}</span>
           <span className="text-[var(--muted)]">{p.totalTrades} trades</span>
+          {!p.meetsMinTrades && (
+            <span className="px-1 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400" title="Closes fewer trades than your minimum — excluded from the best picks.">
+              below min
+            </span>
+          )}
         </div>
       </div>
     );
@@ -137,9 +147,10 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
       <div className="glass rounded-xl p-5">
         <p className="text-xs text-[var(--muted)] mb-4">
           Sweeps the strategy&apos;s parameters across a grid, backtesting every combination, and shows a performance
-          heatmap. The chosen metric colors each cell; click a cell to inspect that combination.
+          heatmap. The chosen metric colors each cell; click a cell to inspect that combination. Combinations that close
+          fewer trades than the minimum you set cannot be picked as the best — a Sharpe from a handful of trades is noise.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           <div>
             <label className="block text-xs text-[var(--muted)] mb-1">Ticker</label>
             <input
@@ -174,6 +185,17 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
                 </button>
               ))}
             </div>
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--muted)] mb-1">
+              Min trades <span className="opacity-60">(0 = off)</span>
+            </label>
+            <input
+              type="number" min={0} max={10000} value={minTrades}
+              onChange={(e) => setMinTrades(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+              title="Quality floor: combinations that close fewer trades than this are kept in the grid but excluded from the best picks."
+              className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+            <p className="text-[10px] text-[var(--muted)] mt-1">Applied to the best-combination picks.</p>
           </div>
           <div>
             <label className="block text-xs text-[var(--muted)] mb-1">Heatmap metric</label>
@@ -239,8 +261,8 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
                         return (
                           <td key={x}
                             onClick={() => setSelected(p.params)}
-                            title={`${paramLabel(result.xAxis)}: ${x}\n${paramLabel(result.yAxis)}: ${y}\n${METRICS.find(m => m.key === metric)?.label ?? ""}: ${fmtMetric(metric, v)}\nTrades: ${p.totalTrades}`}
-                            className={`w-14 h-9 rounded text-center text-[10px] font-mono cursor-pointer transition-transform hover:scale-105 ${isSel ? "ring-2 ring-indigo-400" : ""}`}
+                            title={`${paramLabel(result.xAxis)}: ${x}\n${paramLabel(result.yAxis)}: ${y}\n${METRICS.find(m => m.key === metric)?.label ?? ""}: ${fmtMetric(metric, v)}\nTrades: ${p.totalTrades}${p.meetsMinTrades ? "" : ` (below your minimum of ${result.minTrades})`}`}
+                            className={`w-14 h-9 rounded text-center text-[10px] font-mono cursor-pointer transition-transform hover:scale-105 ${isSel ? "ring-2 ring-indigo-400" : ""} ${p.meetsMinTrades ? "" : "opacity-45"}`}
                             style={{ background: cellColor(v), color: "#fff" }}>
                             {fmtMetric(metric, v)}
                           </td>
@@ -255,6 +277,14 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
               Columns: {paramLabel(result.xAxis)} · Rows: {paramLabel(result.yAxis)}
               {result.skippedCombos > 0 && ` · ${result.skippedCombos} invalid/skipped combinations`}
             </p>
+            {result.minTrades !== null && (
+              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                Minimum trades {result.minTrades} —{" "}
+                {result.belowFloor > 0
+                  ? `${result.belowFloor} of ${result.points.length} combinations closed fewer and were excluded from the best picks (dimmed cells).`
+                  : "every combination met it."}
+              </p>
+            )}
           </div>
 
           {/* Selected combo detail + apply */}
@@ -263,6 +293,12 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
               <div>
                 <p className="text-xs text-[var(--muted)] mb-1">Selected combination</p>
                 <p className="text-sm font-semibold">{comboLabel(selected)}</p>
+                {selectedPoint && !selectedPoint.meetsMinTrades && (
+                  <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                    ⚠ Closed {selectedPoint.totalTrades} trade{selectedPoint.totalTrades === 1 ? "" : "s"} — below your
+                    minimum of {result.minTrades}. Not a valid pick; raise the trade count or lower the floor.
+                  </p>
+                )}
               </div>
               {onApply && (
                 <button
