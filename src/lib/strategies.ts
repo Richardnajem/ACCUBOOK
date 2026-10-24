@@ -4,7 +4,7 @@
 
 import { sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin } from "./ta";
 import { computeMegaScoreSeries } from "./mega-score";
-import type { WeightMap } from "./mega-indicator";
+import { MEGA_BUY_ABOVE, MEGA_SELL_BELOW, type WeightMap } from "./mega-indicator";
 
 export interface StrategyParam {
   key: string;
@@ -215,10 +215,10 @@ const megaScore: StrategyDef = {
   id: "mega_score",
   name: "Mega Score Regime",
   description:
-    "Uses the app's own composite Mega Indicator: stay long only while the weighted technical health score is in a strong regime, step aside when it deteriorates. Entry threshold turns bullish earlier (lower), exit threshold is the bearish trigger — entry < exit creates hysteresis so the position doesn't flip on noise. Every input indicator is computed with trailing windows only (no look-ahead).",
+    "Uses the app's own composite Mega Indicator: go long when the weighted technical health score reaches the buy threshold, step aside when it falls to the sell threshold. The defaults are the Mega Indicator's own baseline bands (buy ≥ 65, sell ≤ 35); lowering them trades more often, raising them waits for a stronger reading. Buy must stay at or above the sell level so the position doesn't flip on noise. Every input indicator is computed with trailing windows only (no look-ahead).",
   params: [
-    { key: "entry", label: "Entry score ≥", default: 55, min: 10, max: 90 },
-    { key: "exit", label: "Exit score ≤", default: 45, min: 5, max: 85 },
+    { key: "entry", label: "Buy when score ≥", default: MEGA_BUY_ABOVE, min: 10, max: 90 },
+    { key: "exit", label: "Sell when score ≤", default: MEGA_SELL_BELOW, min: 5, max: 85 },
     { key: "smooth", label: "Score smoothing (days)", default: 5, min: 1, max: 60 },
   ],
   minBars: 210,

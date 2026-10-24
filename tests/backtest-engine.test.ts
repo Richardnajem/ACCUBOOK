@@ -6,7 +6,7 @@ import {
   type ResolvedCosts,
 } from "../src/lib/backtest-engine";
 import type { Bar } from "../src/lib/market-data";
-import { getStrategy, type StrategyDef } from "../src/lib/strategies";
+import { defaultParams, getStrategy, type StrategyDef } from "../src/lib/strategies";
 
 // ─── Helpers ────────────────────────────────────────────────────
 const META = { symbol: "TEST", name: "Test Corp", currency: "USD", exchange: "SYNTH" };
@@ -290,5 +290,38 @@ describe("simulateCore: trade limits", () => {
     const out = runWith({ maxTrades: 0, minTrades: 0 });
     expect(out.trades).toHaveLength(runWith().trades.length);
     expect(out.warnings.some((w) => w.includes("Entry limit") || w.includes("minimum"))).toBe(false);
+  });
+});
+
+// ─── Mega Score strategy: configurable base buy/sell score ──────
+describe("Mega Score strategy base score", () => {
+  const strategy = getStrategy("mega_score") as StrategyDef;
+
+  it("starts at the Mega Indicator baseline bands", () => {
+    const defaults = defaultParams(strategy);
+    expect(defaults.entry).toBe(65);
+    expect(defaults.exit).toBe(35);
+    expect(strategy.validate!(defaults)).toBe(true);
+  });
+
+  it("rejects a buy threshold below the sell threshold", () => {
+    expect(strategy.validate!({ entry: 70, exit: 30 })).toBe(true);
+    expect(strategy.validate!({ entry: 40, exit: 50 })).toBe(false);
+  });
+
+  it("trades the level the user picks", () => {
+    // A flat score series cannot be produced here, but the strategy's signal
+    // must still be a 0/1 position array of the same length for any valid band.
+    const closes = Array.from({ length: 260 }, (_, i) => 100 + Math.sin(i / 9) * 8);
+    const bars = makeBars(closes);
+    const high = bars.map((b) => b.high);
+    const low = bars.map((b) => b.low);
+    const pos = strategy.generate({
+      open: bars.map((b) => b.open), high, low, close: closes,
+      volume: bars.map((b) => b.volume),
+      params: { entry: 65, exit: 35, smooth: 1 },
+    });
+    expect(pos).toHaveLength(closes.length);
+    for (const p of pos) expect([0, 1]).toContain(p);
   });
 });

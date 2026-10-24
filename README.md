@@ -59,9 +59,10 @@ leaves your machine.
 - **Famous strategies** — SMA/EMA crossovers, RSI mean reversion, MACD, Bollinger,
   breakout (Turtle), time-series momentum, buy & hold, and the **Mega Score Regime**
   strategy that trades the app's own composite indicator (`src/lib/strategies.ts`).
-- **Mega Score weights** — the Mega Score strategy (and its price-chart overlay) can
-  use the weights you tuned on the Mega Indicator page; Compare/Optimize/Walk-Forward
-  apply them too.
+- **Mega Score weights & base score** — the Mega Score strategy (and its price-chart
+  overlay) can use the weights you tuned on the Mega Indicator page; Compare/Optimize/
+  Walk-Forward apply them too. Its buy/sell score levels are editable in the backtest
+  (defaults: the Mega Indicator baseline, buy ≥ 65 / sell ≤ 35).
 - **Real market data** — daily OHLCV from Yahoo Finance (split/dividend-adjusted,
   multi-host failover) with Nasdaq and Stooq fallbacks, cached in SQLite so repeat
   backtests are instant and work offline.

@@ -9,6 +9,7 @@ import { SortableTable, Column } from "@/components/SortableTable";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 import { downloadCSV } from "@/lib/export";
 import { loadMegaPrefs, megaWeightsLabel, activeMegaWeights, type MegaPrefs } from "@/lib/mega-prefs";
+import { MEGA_BUY_ABOVE, MEGA_SELL_BELOW } from "@/lib/mega-indicator";
 import type { BacktestOutput } from "@/lib/backtest-engine";
 import StrategyCompare from "./StrategyCompare";
 import ParamOptimizer from "./ParamOptimizer";
@@ -94,6 +95,13 @@ export default function StockBacktest() {
   }, []);
 
   const selected = catalog.find(s => s.id === strategyId);
+  // Mega Score's buy/sell thresholds have their own "base score" panel below,
+  // so keep them out of the generic strategy-parameters row.
+  const visibleParams = selected
+    ? selected.params.filter(
+        (p) => !(selected.id === "mega_score" && (p.key === "entry" || p.key === "exit"))
+      )
+    : [];
 
   const changeStrategy = (id: string) => {
     setStrategyId(id);
@@ -375,6 +383,39 @@ export default function StockBacktest() {
                 strategy + chart overlay will use them
               </span>
             )}
+
+            {/* Base score: the score levels that trigger buy and sell. */}
+            <div className="w-full flex flex-wrap items-end gap-4 pt-3 border-t border-[var(--card-border)]">
+              <div>
+                <label className="block text-[10px] text-[var(--muted)] mb-1">Buy when score ≥</label>
+                <input
+                  type="number" min={10} max={90} step={1}
+                  value={params.entry ?? MEGA_BUY_ABOVE}
+                  onChange={(e) => setParams(prev => ({ ...prev, entry: Number(e.target.value) }))}
+                  className="w-24 px-2 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="block text-[10px] text-[var(--muted)] mb-1">Sell when score ≤</label>
+                <input
+                  type="number" min={5} max={85} step={1}
+                  value={params.exit ?? MEGA_SELL_BELOW}
+                  onChange={(e) => setParams(prev => ({ ...prev, exit: Number(e.target.value) }))}
+                  className="w-24 px-2 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+              </div>
+              <button
+                onClick={() => setParams(prev => ({ ...prev, entry: MEGA_BUY_ABOVE, exit: MEGA_SELL_BELOW }))}
+                className="px-2 py-1.5 text-[10px] rounded border border-[var(--input-border)] text-[var(--muted)] hover:text-[var(--foreground)]">
+                Reset to baseline ({MEGA_BUY_ABOVE} / {MEGA_SELL_BELOW})
+              </button>
+              <span className="text-[11px] text-[var(--muted)] basis-full">
+                Base score: the Mega Indicator baseline is buy ≥ {MEGA_BUY_ABOVE}, sell ≤ {MEGA_SELL_BELOW}. Buy must be at or above sell.
+              </span>
+              {(params.entry ?? MEGA_BUY_ABOVE) < (params.exit ?? MEGA_SELL_BELOW) && (
+                <span className="text-[11px] text-amber-500 dark:text-amber-400 basis-full">
+                  ⚠ Buy threshold is below sell — raise buy or lower sell, or the position will flip on noise.
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -382,9 +423,9 @@ export default function StockBacktest() {
         {selected && (
           <div className="mt-4 p-3 rounded-lg" style={{ background: "var(--input-bg)" }}>
             <p className="text-xs text-[var(--muted)] leading-relaxed">{selected.description}</p>
-            {selected.params.length > 0 && (
+            {visibleParams.length > 0 && (
               <div className="flex flex-wrap items-end gap-4 mt-3">
-                {selected.params.map(p => (
+                {visibleParams.map(p => (
                   <div key={p.key}>
                     <label className="block text-[10px] text-[var(--muted)] mb-1">{p.label}</label>
                     <input
