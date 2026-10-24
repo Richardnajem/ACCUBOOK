@@ -1,6 +1,6 @@
 {
   "name": "stockfolio",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "private": true,
   "description": "Stockfolio — local-first portfolio manager by Richard Najem",
   "author": "Richard Najem <richard2.najem@gmail.com>",
