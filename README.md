@@ -21,15 +21,20 @@ leaves your machine.
 ### Analysis
 - **Mega Indicator** — one composite 0–100 technical health score per ticker, blending
   trend (50/200 SMA), RSI, MACD, Bollinger position, ATR%, momentum, volume ratio,
-  52-week-high distance, Kaufman Efficiency Ratio, and Nadaraya-Watson kernel
-  regression (slope + residual), plus the full SMA/EMA 10–200 family. Every indicator
-  has an adjustable weight and presets (Everything / Trend / Momentum / Mean Reversion /
-  Smooth Trends). Score-over-time history is computed with trailing windows only
-  (no look-ahead) and cached in SQLite.
+  52-week-high/low distance, Kaufman Efficiency Ratio, and Nadaraya-Watson kernel
+  regression (slope + residual), plus the full SMA/EMA 10–200 family and the
+  Connors RSI / Coppock / PMO / DPO / Ease of Movement / ATR-stop catalogue.
+  The default composite is **research-weighted to 100 points** (RSI and Bollinger
+  20 each, MACD 10, the SMA/EMA family 0.5 each …); every indicator still has an
+  adjustable weight and presets (Balanced / Everything / Trend / Momentum / Mean
+  Reversion / Smooth Trends). The score drives a baseline decision shown beside
+  the gauge — **Buy ≥ 65 · Hold 35–65 · Sell < 35** — and score-over-time
+  history is computed with trailing windows only (no look-ahead) and cached in
+  SQLite.
 - **Watchlist** — track ideas with live quotes and target-price alerts that show how
   far price is from your entry point.
-- **Indicators engine** — SMA, EMA, RSI, MACD, Bollinger Bands, ATR and more
-  (`src/lib/ta.ts`).
+- **Indicators engine** — SMA, EMA, RSI, MACD, Bollinger Bands, ATR, Connors RSI,
+  Coppock, PMO, DPO, Ease of Movement and more (`src/lib/ta.ts`).
 
 ### Company Research
 - **SEC fundamentals** — search any SEC filer by ticker or CIK: company profile,

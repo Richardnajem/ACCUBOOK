@@ -7,7 +7,7 @@
 // that state. Nothing here is random — the same market state always produces the
 // same suggestions, which is what makes the behaviour testable.
 
-import type { IndicatorSpec, WeightMap } from "./mega-indicator";
+import { defaultWeightFor, type IndicatorSpec, type WeightMap } from "./mega-indicator";
 
 export interface SuggestionContext {
   /** ADX(14): trend strength, 0-100. */
@@ -74,21 +74,29 @@ export function suggestIndicators(input: SuggestionInput): Suggestion[] {
   const weightOf = (id: string): number => {
     const set = input.weights[id];
     if (set !== undefined) return Math.max(0, set);
-    return byId.get(id)?.optional ? 0 : 1;
+    const spec = byId.get(id);
+    return spec ? defaultWeightFor(spec.id, spec.optional) : 0;
   };
 
   // Priority-ordered merge: a repeated id keeps the strongest reason and never
   // ends up weighted below what any rule asked for.
+  //
+  // Rule intensities are 1-4. On the balanced 100-point default scale a level
+  // adds 2 points, and it is added to the indicator's own default (0 for a
+  // catalogue entry), so a level-2 boost asks for 4 more points whether the
+  // indicator is a 20-point core signal or one being added for the first time.
+  // A rule never asks to *lower* a weight that is already at least that high.
   const merged = new Map<string, Suggestion>();
   const propose = (
     id: string,
-    weight: number,
+    level: number,
     reason: string,
     priority: number
   ): void => {
     const spec = byId.get(id);
     if (!spec) return;
     const current = weightOf(id);
+    const weight = defaultWeightFor(id, spec.optional) + level * 2;
     if (current >= weight) return; // already at least this strong — nothing to do
     const candidate: Suggestion = {
       id,

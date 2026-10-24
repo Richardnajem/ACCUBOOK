@@ -918,3 +918,280 @@ export function percentSlope(values: number[], base: number[]): number[] {
     return ((v - prev) / denom) * 100;
   });
 }
+
+// ─── "technicals richard" additions ─────────────────────────────
+// The blocks that workbook carries and the app had yet to compute: the
+// momentum family (Connors RSI, Coppock, PMO, DPO), Ease of Movement, the
+// EMA-200 filtered ATR stop and the distance above the 52-week low.
+// All causal (trailing windows only), NaN through warm-up.
+
+/**
+ * Rate of change over `period` bars, in percent: (v − v[t−period])/v[t−period]·100.
+ * A zero base has no answer and stays NaN rather than reporting an infinite jump.
+ */
+export function rateOfChange(values: number[], period: number): number[] {
+  const out: number[] = new Array(values.length).fill(NaN);
+  if (period <= 0) return out;
+  for (let i = period; i < values.length; i++) {
+    const base = values[i - period];
+    if (!Number.isFinite(values[i]) || !Number.isFinite(base) || base === 0) continue;
+    out[i] = ((values[i] - base) / base) * 100;
+  }
+  return out;
+}
+
+/**
+ * Linearly weighted moving average: the most recent bar carries weight
+ * `period`, the oldest weight 1 (the standard WMA, and the one the Coppock
+ * curve is defined on). NaN during warm-up; a window with a gap stays NaN.
+ */
+export function wma(values: number[], period: number): number[] {
+  const out: number[] = new Array(values.length).fill(NaN);
+  if (period <= 0) return out;
+  const denom = (period * (period + 1)) / 2;
+  for (let i = period - 1; i < values.length; i++) {
+    let sum = 0;
+    let ok = true;
+    for (let j = 0; j < period; j++) {
+      const v = values[i - period + 1 + j];
+      if (!Number.isFinite(v)) { ok = false; break; }
+      sum += (j + 1) * v;
+    }
+    if (ok) out[i] = sum / denom;
+  }
+  return out;
+}
+
+export interface ConnorsRsiResult {
+  /** RSI of the close over `rsiPeriod` bars (short — 3 by default). */
+  rsi: number[];
+  /** RSI of the up/down streak length over `streakPeriod` bars. */
+  streakRsi: number[];
+  /** Percent rank (0-100) of the 1-bar return among the prior `rankPeriod` bars. */
+  percentRank: number[];
+  /** The average of the three legs — ConnorsRSI, 0-100. */
+  value: number[];
+}
+
+/**
+ * Connors RSI (Connors & Alvarez): the mean of three short-term readings —
+ *   1. RSI(3) of the close
+ *   2. RSI(2) of the streak length (how many consecutive up/down closes)
+ *   3. the percent rank of today's 1-bar return in the last 100 bars
+ * Because every leg is short and bounded, it turns far faster than RSI(14);
+ * the conventional extremes are 90 (overbought) and 10 (oversold).
+ * A flat close resets the streak to 0; percent rank counts prior returns that
+ * are strictly lower, so a tie scores the lower rank rather than a fake one.
+ */
+export function connorsRsi(
+  closes: number[],
+  rsiPeriod = 3,
+  streakPeriod = 2,
+  rankPeriod = 100
+): ConnorsRsiResult {
+  const n = closes.length;
+  const r = rsi(closes, rsiPeriod);
+
+  const streak: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (i === 0) { streak[i] = 0; continue; }
+    const change = closes[i] - closes[i - 1];
+    if (!Number.isFinite(change)) continue;
+    if (change > 0) streak[i] = (Number.isFinite(streak[i - 1]) && streak[i - 1] > 0 ? streak[i - 1] : 0) + 1;
+    else if (change < 0) streak[i] = (Number.isFinite(streak[i - 1]) && streak[i - 1] < 0 ? streak[i - 1] : 0) - 1;
+    else streak[i] = 0;
+  }
+  const streakRsi = rsi(streak, streakPeriod);
+
+  const returns: number[] = closes.map((c, i) =>
+    i === 0 || !Number.isFinite(closes[i - 1]) || closes[i - 1] === 0
+      ? NaN
+      : c / closes[i - 1] - 1
+  );
+  const percentRank: number[] = new Array(n).fill(NaN);
+  if (rankPeriod > 0) {
+    for (let i = rankPeriod; i < n; i++) {
+      if (!Number.isFinite(returns[i])) continue;
+      let lower = 0;
+      let ok = true;
+      for (let j = i - rankPeriod; j < i; j++) {
+        if (!Number.isFinite(returns[j])) { ok = false; break; }
+        if (returns[j] < returns[i]) lower++;
+      }
+      if (ok) percentRank[i] = (lower / rankPeriod) * 100;
+    }
+  }
+
+  const value = closes.map((_, i) =>
+    Number.isFinite(r[i]) && Number.isFinite(streakRsi[i]) && Number.isFinite(percentRank[i])
+      ? (r[i] + streakRsi[i] + percentRank[i]) / 3
+      : NaN
+  );
+  return { rsi: r, streakRsi, percentRank, value };
+}
+
+/**
+ * Coppock Curve: a 10-month WMA of the sum of the 14- and 11-bar rates of
+ * change — designed for monthly bars, applied here to daily closes. A move
+ * through zero marks the end of a bear phase (the only signal Edwin Coppock
+ * intended); on daily data it is a medium-term momentum turn.
+ * ROC is in percent (the workbook keeps it as a fraction); the WMA weights the
+ * newest bar most, while the workbook's own final smoothing weights the oldest
+ * bar most, so its curve is the mirror image of a real Coppock.
+ */
+export function coppock(closes: number[], wmaPeriod = 10, longRoc = 14, shortRoc = 11): number[] {
+  const long = rateOfChange(closes, longRoc);
+  const short = rateOfChange(closes, shortRoc);
+  const sum = long.map((v, i) =>
+    Number.isFinite(v) && Number.isFinite(short[i]) ? v + short[i] : NaN
+  );
+  return wma(sum, wmaPeriod);
+}
+
+export interface PmoResult {
+  /** Price Momentum Oscillator: 10 · EMA(35, 1-bar ROC %). */
+  pmo: number[];
+  /** Signal line: EMA(20, PMO). */
+  signal: number[];
+  /** PMO − signal: positive while momentum is accelerating. */
+  histogram: number[];
+}
+
+/**
+ * Price Momentum Oscillator (StockCharts): smooth the 1-bar rate of change with
+ * a 35-period EMA, scale by 10, then take a 20-period EMA of that as the signal.
+ * The EMA is seeded on the first 35 finite returns, so the line starts exactly
+ * when its own smoothing is ready. The reference workbook seeds its EMAs on the
+ * very first return instead, which makes its early values differ; the two
+ * converge as the recursion forgets the seed.
+ */
+export function pmo(
+  closes: number[],
+  emaPeriod = 35,
+  signalPeriod = 20,
+  scale = 10
+): PmoResult {
+  const roc1: number[] = closes.map((c, i) =>
+    i === 0 || !Number.isFinite(closes[i - 1]) || closes[i - 1] === 0
+      ? NaN
+      : ((c - closes[i - 1]) / closes[i - 1]) * 100
+  );
+  // EMA that starts at the first full window of finite values instead of
+  // treating a leading NaN as part of the seed.
+  const alignedEma = (values: number[], period: number): number[] => {
+    const out: number[] = new Array(values.length).fill(NaN);
+    const start = values.findIndex(Number.isFinite);
+    if (start < 0 || period <= 0) return out;
+    const compact = ema(values.slice(start), period);
+    for (let i = 0; i < compact.length; i++) out[start + i] = compact[i];
+    return out;
+  };
+  const pmoLine = alignedEma(roc1, emaPeriod).map((v) => (Number.isFinite(v) ? v * scale : NaN));
+  const signal = alignedEma(pmoLine, signalPeriod);
+  const histogram = pmoLine.map((v, i) =>
+    Number.isFinite(v) && Number.isFinite(signal[i]) ? v - signal[i] : NaN
+  );
+  return { pmo: pmoLine, signal, histogram };
+}
+
+/**
+ * Detrended Price Oscillator (period 20 by default): the close from
+ * `period/2 + 1` bars ago minus the current `period`-bar SMA. Shifting the
+ * close back removes the trend without an average of averages, leaving the
+ * cycle; positive = the earlier price was above today's average.
+ * Warm-up stays NaN until both inputs exist.
+ */
+export function dpo(values: number[], period = 20): number[] {
+  const out: number[] = new Array(values.length).fill(NaN);
+  const shift = Math.floor(period / 2) + 1;
+  const average = sma(values, period);
+  for (let i = 0; i < values.length; i++) {
+    if (i < shift || !Number.isFinite(average[i]) || !Number.isFinite(values[i - shift])) continue;
+    out[i] = values[i - shift] - average[i];
+  }
+  return out;
+}
+
+/**
+ * Ease of Movement, raw per bar (Arms): how far the midpoint travelled for the
+ * volume that bar needed to move it.
+ *   mid  = (H + L)/2;   box = volume / (H − L)
+ *   EMV  = (mid − mid[prev]) / box
+ * A bar with no range or no volume has no reading (NaN). Positive = price rose
+ * on comparatively light volume. The units are price per (volume/price); the
+ * smoothed, ×100 000 form below is the one the workbook quotes.
+ */
+export function easeOfMovement(highs: number[], lows: number[], volumes: number[]): number[] {
+  const n = volumes.length;
+  const out: number[] = new Array(n).fill(NaN);
+  for (let i = 1; i < n; i++) {
+    const h = highs[i];
+    const l = lows[i];
+    const v = volumes[i];
+    if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(v) || v <= 0 || h <= l) {
+      continue;
+    }
+    const mid = (h + l) / 2;
+    const prevMid = (highs[i - 1] + lows[i - 1]) / 2;
+    if (!Number.isFinite(prevMid)) continue;
+    out[i] = ((mid - prevMid) / (v / (h - l)));
+  }
+  return out;
+}
+
+/**
+ * Ease of Movement smoothed over `period` bars and scaled ×100 000 — the
+ * "Scaled EMV" the reference workbook quotes. Smoothing is what makes it
+ * readable; the raw per-bar value is dominated by single-bar range noise.
+ * A window with a gap stays NaN (windowMean never averages a partial window).
+ */
+export function emv(
+  highs: number[],
+  lows: number[],
+  volumes: number[],
+  period = 14
+): number[] {
+  const scaled = easeOfMovement(highs, lows, volumes).map((v) =>
+    Number.isFinite(v) ? v * 100_000 : NaN
+  );
+  return windowMean(scaled, period);
+}
+
+export interface AtrStopResult {
+  /** The stop line: 3·ATR below price above the EMA-200, 3·ATR above it below. */
+  line: number[];
+  /** +1 while price holds above the EMA-200, −1 while it does not. */
+  direction: number[];
+}
+
+/**
+ * EMA-200 filtered ATR stop: when the close holds above its 200-day EMA the
+ * stop sits 3·ATR(14) *below* price (a long regime), otherwise 3·ATR above it
+ * (a short/avoid regime) — the workbook's "ATR Trailing Stop with EMA 200
+ * filtered" line. The filter is the point: an ATR band alone flips with every
+ * spike, the EMA-200 keeps the stop on the side of the primary trend.
+ * Both inputs must be ready; before then the reading is honestly NaN.
+ */
+export function atrStop(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  atrPeriod = 14,
+  mult = 3,
+  emaPeriod = 200
+): AtrStopResult {
+  const n = closes.length;
+  const line: number[] = new Array(n).fill(NaN);
+  const direction: number[] = new Array(n).fill(NaN);
+  const range = atr(highs, lows, closes, atrPeriod);
+  const trend = ema(closes, emaPeriod);
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(range[i]) || !Number.isFinite(trend[i]) || !Number.isFinite(closes[i])) {
+      continue;
+    }
+    const up = closes[i] >= trend[i];
+    line[i] = up ? closes[i] - mult * range[i] : closes[i] + mult * range[i];
+    direction[i] = up ? 1 : -1;
+  }
+  return { line, direction };
+}

@@ -6,7 +6,9 @@ import {
   ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell,
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
-import { effectiveWeight, scoreColor, scoreLabel, WeightMap } from "@/lib/mega-indicator";
+import {
+  actionFor, defaultWeightFor, effectiveWeight, percentShares, scoreColor, scoreLabel, WeightMap,
+} from "@/lib/mega-indicator";
 import {
   scoreWithOverride,
   mergeFormula,
@@ -192,9 +194,10 @@ const categoryIcons: Record<string, string> = {
   Composite: "🧮",
 };
 
-type Preset = "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
+type Preset = "balanced" | "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
 
 const PRESETS: Array<{ key: Preset; label: string; hint: string }> = [
+  { key: "balanced", label: "⚖️ Balanced", hint: "Research-weighted default: RSI and Bollinger 20% each, everything else sized by signal (weights total 100)" },
   { key: "all", label: "⚖️ Everything", hint: "All indicators equally weighted" },
   { key: "trend", label: "🧭 Trend", hint: "Trend, MAs and kernel slope emphasized" },
   { key: "momentum", label: "🚀 Momentum", hint: "RSI, MACD and 3-month momentum emphasized" },
@@ -205,12 +208,18 @@ const PRESETS: Array<{ key: Preset; label: string; hint: string }> = [
 // Concrete weight maps per preset (indicator ids match lib/mega-indicator specs)
 function presetWeights(p: Preset, indicators: MegaIndicator[]): WeightMap {
   const base: WeightMap = {};
-  for (const ind of indicators) base[ind.id] = ind.optional ? 0 : 1;
+  for (const ind of indicators) base[ind.id] = defaultWeightFor(ind.id, ind.optional);
   const setMany = (pred: (i: MegaIndicator) => boolean, w: number) => {
     for (const ind of indicators) if (pred(ind)) base[ind.id] = w;
   };
   const has = (id: string) => indicators.some((i) => i.id === id);
   switch (p) {
+    case "balanced":
+      break; // base is already the balanced default
+    case "all":
+      // Everything means everything: equal weight for the built-ins.
+      for (const ind of indicators) base[ind.id] = ind.optional ? 0 : 1;
+      break;
     case "trend":
       setMany((i) => ["ta-trend-50-200", "ta-kernel-slope"].includes(i.id), 4);
       setMany((i) => i.category === "Moving Averages", 2);
@@ -242,7 +251,7 @@ export default function MegaIndicatorPage() {
   const [ticker, setTicker] = useState("AAPL");
   const [tickerInput, setTickerInput] = useState("AAPL");
   const [weights, setWeights] = useState<WeightMap>({});
-  const [preset, setPreset] = useState<Preset>("all"); // "custom" = user moved a slider manually
+  const [preset, setPreset] = useState<Preset>("balanced"); // "custom" = user moved a slider manually
   const [expandedCat, setExpandedCat] = useState<string | null>(null);
   const [live, setLive] = useState<LiveResponse | null>(null);
   // When the current payload arrived. Quote staleness is measured against this
@@ -280,11 +289,11 @@ export default function MegaIndicatorPage() {
     let cancelled = false;
     (async () => {
       const t = loadStored<string>(LS_TICKER, "");
-      const rawPreset = loadStored<string>(LS_PRESET, "custom");
+      const rawPreset = loadStored<string>(LS_PRESET, "balanced");
       // Ignore presets removed in the pivot (old values like "value" would
       // otherwise persist forever with no matching button).
-      const VALID_PRESETS: Preset[] = ["all", "trend", "momentum", "reversal", "smooth", "custom"];
-      const p = (VALID_PRESETS as string[]).includes(rawPreset) ? (rawPreset as Preset) : "custom";
+      const VALID_PRESETS: Preset[] = ["balanced", "all", "trend", "momentum", "reversal", "smooth", "custom"];
+      const p = (VALID_PRESETS as string[]).includes(rawPreset) ? (rawPreset as Preset) : "balanced";
       if (cancelled) return;
       if (t) { setTicker(t); setTickerInput(t); }
       if (p !== "custom") setPreset(p);
@@ -306,7 +315,9 @@ export default function MegaIndicatorPage() {
         if (cancelled) return;
         if (!res.ok || json.error) throw new Error(json.error || `HTTP ${res.status}`);
         setData(json);
-        // Initialize weights exactly once: restore saved weights, else all-1s.
+        // Initialize weights exactly once: restore saved weights, else take the
+        // server's balanced defaults (RSI + Bollinger 20 each, 100 in total;
+        // catalogue entries arrive at 0 and stay out of the composite).
         if (json.indicators && !weightsInitRef.current) {
           weightsInitRef.current = true;
           const stored = loadStored<WeightMap>(LS_WEIGHTS, {});
@@ -314,8 +325,7 @@ export default function MegaIndicatorPage() {
             setWeights(stored);
           } else {
             const init: WeightMap = {};
-            // Catalogue indicators start outside the composite.
-            for (const ind of json.indicators) init[ind.id] = ind.optional ? 0 : 1;
+            for (const ind of json.indicators) init[ind.id] = ind.weight;
             setWeights(init);
           }
         }
@@ -603,15 +613,33 @@ export default function MegaIndicatorPage() {
 
   const resetWeights = () => {
     if (!data) return;
-    setPreset("all");
+    setPreset("balanced");
     const w: WeightMap = {};
-    for (const ind of data.indicators) w[ind.id] = 1;
+    // Back to the research-weighted default — not a flat 1 on every row.
+    for (const ind of data.indicators) w[ind.id] = defaultWeightFor(ind.id, ind.optional);
     setWeights(w);
   };
 
   const totalEffectiveWeight = useMemo(
     () => (data?.indicators || []).reduce((s, i) => s + effectiveWeight(i, weights), 0),
     [data, weights]
+  );
+
+  // Displayed weight shares. percentShares rounds the shares and hands the
+  // leftover tenths out by largest remainder, so the panel's percentages always
+  // add up to exactly 100 — a flat six-way split shows 16.7 four times and
+  // 16.6 twice, never 100.2.
+  const weightShares = useMemo(() => {
+    const shares = percentShares(scored.map((i) => effectiveWeight(i, weights)));
+    const map: Record<string, number> = {};
+    scored.forEach((ind, idx) => { map[ind.id] = shares[idx]; });
+    return map;
+  }, [scored, weights]);
+
+  // Category shares get the same treatment (the server rounds each to 0.1%).
+  const categoryShares = useMemo(
+    () => percentShares((view?.categories || []).map((c) => c.weightShare)),
+    [view]
   );
 
   // How many indicators currently have a custom (right-click) formula.
@@ -655,6 +683,15 @@ export default function MegaIndicatorPage() {
 
   const score = view?.score ?? 0;
   const col = scoreColor(score);
+  // Baseline decision for this score: buy / hold / sell (lib/mega-indicator
+  // owns the bands so the UI and any strategy read the same rule).
+  const action = actionFor(score);
+  const actionCls =
+    action.key === "buy"
+      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/40"
+      : action.key === "sell"
+        ? "bg-red-500/15 text-red-500 border-red-500/40"
+        : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/40";
   const circumference = 2 * Math.PI * 50;
 
   const gaugeArc = (score / 100) * circumference;
@@ -753,7 +790,7 @@ export default function MegaIndicatorPage() {
               ✎ Custom
             </span>
           )}
-          <button onClick={resetWeights} title="Reset all weights to 1"
+          <button onClick={resetWeights} title="Reset to the balanced defaults"
             className="px-3 py-1.5 text-xs font-medium rounded-md text-[var(--muted)] hover:text-[var(--foreground)]">
             ↺ Reset
           </button>
@@ -967,7 +1004,16 @@ export default function MegaIndicatorPage() {
               {/* Verdict + meta */}
               <div className="flex-1 min-w-0">
                 <h2 className="text-2xl font-bold mb-1">{scoreLabel(score)}</h2>
-                <p className="text-sm text-[var(--muted)] mb-4">{view?.verdict}</p>
+                <p className="text-sm text-[var(--muted)] mb-3">{view?.verdict}</p>
+                <div className="flex flex-wrap items-center gap-2 mb-4" title={action.detail}>
+                  <span className={`px-3 py-1 rounded-full border text-sm font-bold tracking-wide ${actionCls}`}>
+                    {action.label}
+                  </span>
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Baseline: Buy ≥ 65 · Hold 35–65 · Sell &lt; 35
+                  </span>
+                </div>
+                <p className="text-[11px] text-[var(--muted)] mb-4">{action.detail}</p>
                 <div className="flex flex-wrap gap-2 text-xs">
                   <span className="px-2.5 py-1 rounded-full bg-[var(--card-hover)] text-[var(--muted)]">
                     {view?.meta.technicalCount} indicators
@@ -1166,7 +1212,7 @@ export default function MegaIndicatorPage() {
                       <div className="divide-y divide-[var(--card-border)]">
                         {items.map((ind) => {
                           const w = effectiveWeight(ind, weights);
-                          const wPct = totalEffectiveWeight > 0 ? (Math.max(0, w) / totalEffectiveWeight) * 100 : 0;
+                          const wPct = weightShares[ind.id] ?? 0;
                           return (
                             <div key={ind.id}
                               onContextMenu={(e) => { e.preventDefault(); setMenu({ id: ind.id, x: e.clientX, y: e.clientY }); }}
@@ -1282,22 +1328,25 @@ export default function MegaIndicatorPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(view?.categories || []).map((c) => (
+                  {(view?.categories || []).map((c, idx) => {
+                    const share = categoryShares[idx] ?? 0;
+                    return (
                     <tr key={c.category} className="border-b border-[var(--card-border)] hover:bg-[var(--table-row-hover)]">
                       <td className="py-2.5 font-medium">{categoryIcons[c.category] || "•"} {c.category}</td>
                       <td className="py-2.5 text-center">
                         <div className="flex items-center justify-center gap-2">
                           <div className="w-24 h-2 rounded-full overflow-hidden bg-[var(--card-border)]">
-                            <div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.min(100, c.weightShare)}%` }} />
+                            <div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.min(100, share)}%` }} />
                           </div>
-                          <span className="text-xs tabular-nums">{c.weightShare.toFixed(1)}%</span>
+                          <span className="text-xs tabular-nums">{share.toFixed(1)}%</span>
                         </div>
                       </td>
                       <td className="py-2.5 text-right font-bold" style={{ color: scoreColor(c.score) }}>
                         {c.score.toFixed(1)}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

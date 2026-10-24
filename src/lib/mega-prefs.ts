@@ -8,16 +8,17 @@
 // Browser-only: every export guards `window` so importing this from server
 // code never crashes (it just reports "nothing saved").
 
-import { OPTIONAL_IDS, type WeightMap } from "./mega-indicator";
+import { OPTIONAL_IDS, defaultWeightFor, type WeightMap } from "./mega-indicator";
 
 // Keys must match LS_* constants in dashboard/mega-indicator/page.tsx.
 const LS_WEIGHTS = "mega-indicator:weights:v1";
 const LS_PRESET = "mega-indicator:preset:v1";
 const LS_TICKER = "mega-indicator:ticker:v1";
 
-export type MegaPresetKey = "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
+export type MegaPresetKey = "balanced" | "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
 
 export const MEGA_PRESET_LABELS: Record<MegaPresetKey, string> = {
+  balanced: "⚖️ Balanced",
   all: "⚖️ Everything",
   trend: "🧭 Trend",
   momentum: "🚀 Momentum",
@@ -38,15 +39,16 @@ export interface MegaPrefs {
 }
 
 /**
- * True when the map matches `defaultWeights` exactly: 1 for the built-ins,
- * 0 for the catalogue, absent entries meaning "that default". Anything
- * else — including the all-ones map behind "Everything" — has to travel to
- * the API, or the page's composite and the server's composite disagree.
+ * True when the map matches `defaultWeights` exactly: the balanced default for
+ * each built-in (RSI and Bollinger at 20 …) and 0 for the catalogue, absent
+ * entries meaning "that default". Anything else — including the all-ones map
+ * behind "Everything" — has to travel to the API, or the page's composite and
+ * the server's composite disagree.
  */
 export function isEvenWeights(w: WeightMap | null): boolean {
   if (!w) return true;
   return Object.entries(w).every(([id, v]) => {
-    const def = OPTIONAL_IDS.has(id) ? 0 : 1;
+    const def = defaultWeightFor(id, OPTIONAL_IDS.has(id));
     return v === undefined || v === def;
   });
 }
@@ -95,7 +97,7 @@ export function loadMegaPrefs(): MegaPrefs {
 
 /** Short human label for a saved weight map (preset name, "Custom", or default). */
 export function megaWeightsLabel(prefs: MegaPrefs): string {
-  if (!prefs.weights || isEvenWeights(prefs.weights)) return "Even weights (default)";
+  if (!prefs.weights || isEvenWeights(prefs.weights)) return "Balanced (default)";
   if (prefs.preset) return MEGA_PRESET_LABELS[prefs.preset];
   return MEGA_PRESET_LABELS.custom;
 }

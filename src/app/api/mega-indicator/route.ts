@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDailyBars } from "@/lib/market-data";
 import {
-  sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
+  sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin, stochastic, cci, stdev, williamsR, stochRsi,
   adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
   donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
   balanceOfPower, cmo, percentSlope,
+  connorsRsi, coppock, pmo, dpo, emv, atrStop,
 } from "@/lib/ta";
 import { ALL_SPECS, MA_PERIODS, computeMegaIndicator, defaultWeights, WeightMap } from "@/lib/mega-indicator";
 import { suggestIndicators, median, type SuggestionContext } from "@/lib/indicator-suggestions";
@@ -231,6 +232,24 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
       ? ctmParts.reduce((s, v) => s + v, 0) / ctmParts.length
       : NaN;
 
+    // ─── technicals richard additions ──────────────────────────
+    const connors = connorsRsi(close, 3, 2, 100);
+    const coppockCurve = coppock(close, 10, 14, 11);
+    const pmoRes = pmo(close, 35, 20, 10);
+    const dpo20 = dpo(close, 20);
+    const dpoPct = Number.isFinite(dpo20[last]) && px !== 0 ? (dpo20[last] / px) * 100 : NaN;
+    const emv14 = emv(high, low, volume, 14);
+    const atrTrail = atrStop(high, low, close, 14, 3, 200);
+    const low52 = rollingMin(close, Math.min(252, close.length));
+    const atrStopPct =
+      Number.isFinite(atrTrail.line[last]) && px !== 0
+        ? ((px - atrTrail.line[last]) / px) * 100
+        : NaN;
+    const dist52Low =
+      Number.isFinite(low52[last]) && low52[last] > 0
+        ? ((px - low52[last]) / low52[last]) * 100
+        : NaN;
+
     // Volatility regime: today's ATR% against its own median over the last year.
     const atrPctHistory: number[] = [];
     for (let i = Math.max(0, last - 249); i <= last; i++) {
@@ -291,6 +310,13 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         "ta-er-10": er10,
         "ta-kernel-slope": slope,
         "ta-kernel-residual": residualPct,
+        "ta-connors-rsi": connors.value[last],
+        "ta-coppock": coppockCurve[last],
+        "ta-pmo": pmoRes.pmo[last],
+        "ta-dpo-pct": dpoPct,
+        "ta-emv-14": emv14[last],
+        "ta-atr-stop": atrStopPct,
+        "ta-dist-52w-low": dist52Low,
         ...maValues,
         ...(customRes?.values ?? {}),
       },

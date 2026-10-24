@@ -20,7 +20,8 @@ import {
   adx, mfi, obv, keltner, keltnerPosition, aroon, superTrend, atr, sma, rsi,
 } from "../src/lib/ta";
 import {
-  ALL_SPECS, OPTIONAL_SPECS, computeMegaIndicator, defaultWeights, effectiveWeight, evenWeights,
+  ALL_SPECS, OPTIONAL_SPECS, actionFor, computeMegaIndicator, defaultWeightFor, defaultWeights,
+  effectiveWeight, evenWeights, percentShares,
 } from "../src/lib/mega-indicator";
 import { suggestIndicators, median, MAX_SUGGESTIONS, type SuggestionContext } from "../src/lib/indicator-suggestions";
 import { isEvenWeights } from "../src/lib/mega-prefs";
@@ -318,7 +319,7 @@ describe("catalogue indicators match their published definitions", () => {
   });
 
   it("every catalogue indicator is a spec, and each spec is optional by default", () => {
-    expect(OPTIONAL_SPECS.length).toBe(17);
+    expect(OPTIONAL_SPECS.length).toBe(24);
     const ids = OPTIONAL_SPECS.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const spec of OPTIONAL_SPECS) {
@@ -329,8 +330,39 @@ describe("catalogue indicators match their published definitions", () => {
     }
     const weights = defaultWeights(ALL_SPECS);
     for (const spec of ALL_SPECS) {
-      expect(weights[spec.id], `${spec.id} default weight`).toBe(spec.optional ? 0 : 1);
+      expect(weights[spec.id], `${spec.id} default weight`).toBe(
+        defaultWeightFor(spec.id, spec.optional)
+      );
     }
+  });
+
+  it("the default composite is balanced: 100 weight, RSI and Bollinger 20 each", () => {
+    const weights = defaultWeights(ALL_SPECS);
+    const total = ALL_SPECS.reduce((s, spec) => s + weights[spec.id], 0);
+    expect(total).toBeCloseTo(100, 10);
+    expect(weights["ta-rsi-14"]).toBe(20);
+    expect(weights["ta-bb-pos"]).toBe(20);
+    for (const spec of OPTIONAL_SPECS) expect(weights[spec.id]).toBe(0);
+    for (const spec of ALL_SPECS.filter((s) => !s.optional)) {
+      expect(weights[spec.id], `${spec.id} is switched off by default`).toBeGreaterThan(0);
+    }
+    // The displayed shares are rounded but still add up to exactly 100.
+    const shares = percentShares(ALL_SPECS.map((s) => weights[s.id]));
+    expect(shares.reduce((s, v) => s + v, 0)).toBeCloseTo(100, 10);
+  });
+
+  it("percentShares keeps the displayed shares at exactly 100 after rounding", () => {
+    const six = percentShares([1, 1, 1, 1, 1, 1]);
+    expect(six.reduce((s, v) => s + v, 0)).toBeCloseTo(100, 10);
+    for (const v of six) expect(v).toBeGreaterThanOrEqual(16.6);
+    // 16.6 × 6 = 99.6; the four leftover tenths go to the largest remainders.
+    expect(six.filter((v) => v === 16.7).length).toBe(4);
+    expect(six.filter((v) => v === 16.6).length).toBe(2);
+
+    const skewed = percentShares([20, 20, 10, 4, 3, 2, 1, 0.5]);
+    expect(skewed.reduce((s, v) => s + v, 0)).toBeCloseTo(100, 10);
+    // A fully-off weight contributes nothing, and an all-off map is all zeros.
+    expect(percentShares([0, 0])).toEqual([0, 0]);
   });
 
   it("the catalogue stays out of the composite until it is added", () => {
@@ -400,7 +432,8 @@ describe("indicator suggestions", () => {
     expect(byId.get("ta-supertrend")!.reason).toContain("ADX 45");
     // Built-ins are already in the composite, so they come back as a reweight.
     expect(byId.get("ta-trend-50-200")?.kind).toBe("reweight");
-    expect(byId.get("ta-trend-50-200")?.weight).toBe(2);
+    // Balanced default is 4; a level-2 rule asks for 4 more points.
+    expect(byId.get("ta-trend-50-200")?.weight).toBe(8);
     expect(out.length).toBeLessThanOrEqual(MAX_SUGGESTIONS);
   });
 
@@ -437,7 +470,8 @@ describe("indicator suggestions", () => {
   });
 
   it("never proposes an indicator that is already at least that strong", () => {
-    const weights = { ...defaults, "ta-supertrend": 1 };
+    // A level-1 rule asks for 2 points, so weight 2 is already enough.
+    const weights = { ...defaults, "ta-supertrend": 2 };
     const out = suggestIndicators({
       context: { ...base, adx: 45 },
       values: {},
@@ -493,12 +527,9 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
 
   it("a saved map from before the catalogue does not pull the catalogue in", () => {
     const partial = computeMegaIndicator({ technical, weights: builtInsOnly });
-    const expected = computeMegaIndicator({ technical, weights: defaultWeights(ALL_SPECS) });
-    expect(partial.score).toBeCloseTo(expected.score, 10);
-    expect(partial.indicators.length).toBe(expected.indicators.length);
-    expect(partial.indicators.filter((i) => i.enabled).length).toBe(
-      expected.indicators.filter((i) => i.enabled).length
-    );
+    const builtInCount = ALL_SPECS.length - OPTIONAL_SPECS.length;
+    expect(partial.indicators.length).toBe(ALL_SPECS.length);
+    expect(partial.indicators.filter((i) => i.enabled).length).toBe(builtInCount);
     for (const spec of OPTIONAL_SPECS) {
       const ind = partial.indicators.find((i) => i.id === spec.id);
       expect(ind, spec.id + " is in the payload").toBeDefined();
@@ -507,12 +538,28 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
     }
   });
 
-  it("effectiveWeight: built-ins 1, catalogue 0, an explicit weight always wins", () => {
-    expect(effectiveWeight({ id: "ta-rsi-14" }, null)).toBe(1);
+  it("effectiveWeight: balanced built-in default, catalogue 0, an explicit weight always wins", () => {
+    expect(effectiveWeight({ id: "ta-rsi-14" }, null)).toBe(20);
+    expect(effectiveWeight({ id: "ta-bb-pos" }, null)).toBe(20);
+    expect(effectiveWeight({ id: "ta-trend-50-200" }, null)).toBe(4);
     expect(effectiveWeight({ id: "ta-adx-14", optional: true }, null)).toBe(0);
     expect(effectiveWeight({ id: "ta-adx-14", optional: true }, { "ta-adx-14": 3 })).toBe(3);
     expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": 0 })).toBe(0);
     expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": -2 })).toBe(0);
+  });
+
+  it("the baseline action follows the score bands — buy ≥ 65, hold 35-65, sell < 35", () => {
+    expect(actionFor(100).key).toBe("buy");
+    expect(actionFor(65).key).toBe("buy");
+    expect(actionFor(64.9).key).toBe("hold");
+    expect(actionFor(50).key).toBe("hold");
+    expect(actionFor(35).key).toBe("hold");
+    expect(actionFor(34.9).key).toBe("sell");
+    expect(actionFor(0).key).toBe("sell");
+    expect(actionFor(NaN).key).toBe("hold");
+    // The payload carries the same action the UI derives from the score.
+    const res = computeMegaIndicator({ technical, weights: defaultWeights(ALL_SPECS) });
+    expect(res.action.key).toBe(actionFor(res.score).key);
   });
 
   it("the payload says which indicators are catalogue ones", () => {
@@ -526,12 +573,12 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
 
   it("isEvenWeights means 'the same as defaultWeights', not merely all-ones", () => {
     expect(isEvenWeights(null)).toBe(true);
-    expect(isEvenWeights({ ...builtInsOnly })).toBe(true);
     expect(isEvenWeights(defaultWeights(ALL_SPECS))).toBe(true);
-    // All-ones over the catalogue is a deliberate choice: it has to travel to the
-    // API, otherwise the page shows a composite the server never computed.
+    // A flat all-ones map is the "Everything" preset, not the balanced default:
+    // it has to travel to the API, or the page and the server would disagree.
+    expect(isEvenWeights({ ...builtInsOnly })).toBe(false);
     expect(isEvenWeights(evenWeights(ALL_SPECS))).toBe(false);
     // So is switching a built-in off.
-    expect(isEvenWeights({ ...builtInsOnly, "ta-rsi-14": 0 })).toBe(false);
+    expect(isEvenWeights({ ...defaultWeights(ALL_SPECS), "ta-rsi-14": 0 })).toBe(false);
   });
 });

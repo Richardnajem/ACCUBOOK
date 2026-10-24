@@ -18,6 +18,7 @@ import {
   adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
   donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
   balanceOfPower, cmo, percentSlope,
+  connorsRsi, coppock, pmo, dpo, emv, atrStop, rollingMin,
 } from "./ta";
 import { evaluateCustomSeries, type CustomIndicatorDef } from "./custom-indicators";
 
@@ -117,6 +118,18 @@ export function computeMegaScoreSeries(
   const ema20Slope = percentSlope(ema20, close);
   const ema200Slope = percentSlope(ema200, close);
 
+  // "technicals richard" additions — all causal.
+  const connors = connorsRsi(close, 3, 2, 100);
+  const coppockCurve = coppock(close, 10, 14, 11);
+  const pmoRes = pmo(close, 35, 20, 10);
+  const dpo20 = dpo(close, 20);
+  const dpoPct = dpo20.map((v, i) =>
+    Number.isFinite(v) && Number.isFinite(close[i]) && close[i] !== 0 ? (v / close[i]) * 100 : NaN
+  );
+  const emv14 = emv(high, low, volume, 14);
+  const atrTrail = atrStop(high, low, close, 14, 3, 200);
+  const low52 = rollingMin(close, Math.min(252, n));
+
   for (let i = 0; i < n; i++) {
     const px = close[i];
     if (!Number.isFinite(px)) continue;
@@ -192,6 +205,20 @@ export function computeMegaScoreSeries(
     if (Number.isFinite(cmo14[i])) put("ta-cmo-14")[i] = cmo14[i];
     if (Number.isFinite(ema20Slope[i])) put("ta-ema20-slope")[i] = ema20Slope[i];
     if (Number.isFinite(ema200Slope[i])) put("ta-ema200-slope")[i] = ema200Slope[i];
+
+    // "technicals richard": Connors RSI, Coppock, PMO, DPO, EMV, the ATR stop
+    // and the distance above the 52-week low.
+    if (Number.isFinite(connors.value[i])) put("ta-connors-rsi")[i] = connors.value[i];
+    if (Number.isFinite(coppockCurve[i])) put("ta-coppock")[i] = coppockCurve[i];
+    if (Number.isFinite(pmoRes.pmo[i])) put("ta-pmo")[i] = pmoRes.pmo[i];
+    if (Number.isFinite(dpoPct[i])) put("ta-dpo-pct")[i] = dpoPct[i];
+    if (Number.isFinite(emv14[i])) put("ta-emv-14")[i] = emv14[i];
+    if (Number.isFinite(atrTrail.line[i]) && px !== 0) {
+      put("ta-atr-stop")[i] = ((px - atrTrail.line[i]) / px) * 100;
+    }
+    if (Number.isFinite(low52[i]) && low52[i] > 0) {
+      put("ta-dist-52w-low")[i] = ((px - low52[i]) / low52[i]) * 100;
+    }
 
     // CTM: mean of RSI, CMO, EMA-20, EMA-200 and ADX. The workbook averages
     // the EMA price levels raw; score them as price-vs-EMA first so CTM stays a

@@ -55,6 +55,7 @@ export interface MegaResult {
   score: number;               // 0-100 composite
   grade: string;               // A+ .. F
   verdict: string;             // human-readable verdict
+  action: MegaAction;          // baseline decision for this score (buy / hold / sell)
   indicators: MegaIndicator[];
   categories: MegaCategorySummary[];
   contributions: Array<{ id: string; name: string; contribution: number }>; // contribution to composite (score*weight)
@@ -220,6 +221,29 @@ export const OPTIONAL_SPECS: IndicatorSpec[] = [
   O("ta-ctm", "CTM (Combined Trend–Momentum)", "Composite", "", "higher", [20, 70],
     "The workbook's CTM: the mean of RSI(14), CMO(14), EMA-20, EMA-200 and ADX(14). The workbook averages the two EMA price levels raw, which makes its CTM drift with the share price; here those legs are converted to the same 0–100 price-vs-EMA readings used elsewhere first, so CTM is a real 0–100 signal. The workbook's 60/40 BUY/SELL levels sit inside this continuous 20–70 scoring band.",
     "CTM = mean( RSI(14), CMO(14), EMA20-score, EMA200-score, ADX(14) ),  where EMA-score = clamp(0,100, ((close/EMA − 1)·100 + 1)/2·100)  — the workbook's raw mean uses the EMA levels in place of those two scores"),
+
+  // ─── Added from "technicals richard.xlsx" ───────────────────
+  O("ta-connors-rsi", "Connors RSI (3, 2, 100)", "Momentum", "", "band", [20, 80],
+    "Three fast readings averaged: RSI(3), RSI(2) of the current up/down streak and the percent rank of today's 1-bar return over the last 100 bars. It turns far faster than RSI(14); the conventional extremes are 90 overbought / 10 oversold, well outside this healthy 20-80 band.",
+    "ConnorsRSI = ( RSI(3, close) + RSI(2, streak) + PercentRank(ROC(1), 100) ) / 3,  streak = consecutive up (+n) or down (−n) closes, 0 on a flat close"),
+  O("ta-coppock", "Coppock Curve (10, 14, 11)", "Momentum", "", "higher", [-5, 5],
+    "A 10-bar weighted average of the 14- and 11-bar rates of change. Designed to mark the end of a bear phase when it turns up through zero; on daily bars it is a medium-term momentum turn. The workbook smooths with its weights reversed (oldest bar heaviest); the app uses the standard WMA, newest bar heaviest.",
+    "Coppock = WMA(10, ROC(14) + ROC(11)),  ROC(n) in percent,  WMA weights the newest bar 10 and the oldest 1"),
+  O("ta-pmo", "PMO (35, 20)", "Momentum", "", "higher", [-3, 3],
+    "Price Momentum Oscillator: the 1-bar return, smoothed by a 35-day EMA and scaled ×10. Its 20-day EMA is the signal line; holding above it means momentum is still building. The workbook seeds its EMAs on the first return, the app on the first full window — they converge as the recursion forgets the seed.",
+    "PMO = 10 · EMA(35, ROC(1)%);  Signal = EMA(20, PMO)"),
+  O("ta-dpo-pct", "DPO (20)", "Momentum", "%", "band", [-5, 5],
+    "Detrended Price Oscillator: the close from 11 bars ago minus today's 20-bar SMA, as a percentage of price. It strips the trend out so the cycle shows; a reading far outside ±5% is stretched relative to its own average.",
+    "DPO = close[t − 11] − SMA(20, close);  value = DPO/close · 100"),
+  O("ta-emv-14", "Ease of Movement (14)", "Volume", "", "higher", [-0.02, 0.02],
+    "How far the bar's midpoint travelled for the volume it took to move it, smoothed over 14 bars and scaled ×100 000 (the workbook's \"Scaled EMV\"). Positive means price is rising on comparatively light volume; negative means it is falling easily.",
+    "mid = (H+L)/2;  box = volume/(H−L);  EMV = (mid − mid₁)/box;  value = SMA(14, EMV · 100 000)"),
+  O("ta-atr-stop", "ATR Stop vs EMA-200 (14, 3)", "Trend", "%", "higher", [-3, 3],
+    "Where price sits relative to an ATR stop that respects the primary trend: above the 200-day EMA the stop is 3·ATR below price, below it the stop is 3·ATR above. Positive values are a long regime, negative values a short/avoid one — the EMA-200 filter stops the stop flipping on every spike.",
+    "line = close ± 3·ATR(14) (minus above EMA(200), plus below);  value = (close − line)/close · 100"),
+  O("ta-dist-52w-low", "Distance above 52-Week Low", "Swing", "%", "higher", [10, 100],
+    "How far price has risen above its 52-week low. The companion to \"distance from the 52-week high\": a market 50%+ above its low is in a different regime from one sitting on it. The workbook computes the same distance from its own low column.",
+    "Distance% = (close − LL(252, close))/LL(252, close) · 100"),
 ];
 
 /** Catalogue ids, for quick membership checks. */
@@ -295,6 +319,56 @@ export function normalizeScore(value: number, spec: IndicatorSpec): number {
   return Math.max(0, 60 - pct * 60);
 }
 
+/** The composite score at which the baseline says buy. */
+export const MEGA_BUY_ABOVE = 65;
+/** Below this the baseline says sell; between the two thresholds it says hold. */
+export const MEGA_SELL_BELOW = 35;
+
+export type MegaActionKey = "buy" | "hold" | "sell";
+
+export interface MegaAction {
+  key: MegaActionKey;
+  label: string;
+  /** Why this action, in plain language — shown under the score. */
+  detail: string;
+  /** The score band that would change the action. */
+  next: string;
+}
+
+/**
+ * The Mega Score baseline: what the composite says to do, not just how healthy
+ * it looks. The bands are deliberately wide — the composite is a blend, and a
+ * blend sitting near neutral is not a trade signal. ≥ 65 buy, 35-65 hold,
+ * < 35 sell; the bands are exported so the UI and any strategy agree on them.
+ */
+export function actionFor(score: number): MegaAction {
+  if (!Number.isFinite(score)) {
+    return { key: "hold", label: "HOLD", detail: "No composite score yet — hold until there is enough data.", next: `Buy ≥ ${MEGA_BUY_ABOVE} · Sell < ${MEGA_SELL_BELOW}` };
+  }
+  if (score >= MEGA_BUY_ABOVE) {
+    return {
+      key: "buy",
+      label: "BUY",
+      detail: `Score ${score.toFixed(1)} is at or above ${MEGA_BUY_ABOVE} — the weighted technical picture is bullish.`,
+      next: `Holds until the score falls below ${MEGA_BUY_ABOVE}`,
+    };
+  }
+  if (score < MEGA_SELL_BELOW) {
+    return {
+      key: "sell",
+      label: "SELL",
+      detail: `Score ${score.toFixed(1)} is below ${MEGA_SELL_BELOW} — the weighted technical picture is bearish.`,
+      next: `Holds until the score reaches ${MEGA_SELL_BELOW}`,
+    };
+  }
+  return {
+    key: "hold",
+    label: "HOLD",
+    detail: `Score ${score.toFixed(1)} is between ${MEGA_SELL_BELOW} and ${MEGA_BUY_ABOVE} — mixed signals, no edge either way.`,
+    next: `Buy at ${MEGA_BUY_ABOVE} · Sell below ${MEGA_SELL_BELOW}`,
+  };
+}
+
 function gradeFor(score: number): string {
   if (score >= 90) return "A+";
   if (score >= 80) return "A";
@@ -335,12 +409,61 @@ export interface MegaInput {
 }
 
 /**
- * Default weights: 1 for the built-ins, 0 for the catalogue. A composite should
- * only contain what the user — or a suggestion they accepted — put there.
+ * Default ("balanced") weights — a research-weighted starting composite, not a
+ * flat one. A flat average lets sixteen near-duplicate SMA/EMA readings outvote
+ * the indicators that actually carry independent information; this map gives
+ * the composite 100 weight in total and reflects what each signal is worth:
+ *
+ *   • RSI(14) and the Bollinger position carry 20 each — the two mean-reversion
+ *     / momentum readings with the most independent signal.
+ *   • MACD histogram 10: the other genuinely orthogonal momentum measure.
+ *   • Trend, ATR, momentum, volume, 52-week distance, efficiency ratio and the
+ *     kernel pair share 42 points — the context a single oscillator lacks.
+ *   • The SMA/EMA family shares 8 points (0.5 each): sixteen correlated
+ *     price-vs-average readings should not dominate the blend.
+ *
+ * The catalogue still starts at 0: an indicator joins the composite only when
+ * the user (or a suggestion they accepted) adds it.
  */
-export function defaultWeights(specs: IndicatorSpec[]): WeightMap {
+export const DEFAULT_WEIGHTS: Readonly<Record<string, number>> = {
+  "ta-rsi-14": 20,
+  "ta-bb-pos": 20,
+  "ta-macd-hist": 10,
+  "ta-trend-50-200": 4,
+  "ta-atr-pct": 4,
+  "ta-stoch-k": 4,
+  "ta-mom-63": 4,
+  "ta-stoch-d": 2,
+  "ta-williams-r": 3,
+  "ta-stochrsi-k": 3,
+  "ta-stochrsi-d": 1,
+  "ta-cci-20": 3,
+  "ta-vol-3d": 1,
+  "ta-vol-ratio": 2,
+  "ta-dist-52w-high": 3,
+  "ta-er-10": 3,
+  "ta-kernel-slope": 3,
+  "ta-kernel-residual": 2,
+  // The SMA/EMA family (16 specs) shares the remaining 8 points.
+  ...Object.fromEntries(
+    MA_PERIODS.flatMap((p) => [[`ta-sma-${p}`, 0.5], [`ta-ema-${p}`, 0.5]])
+  ),
+};
+
+/** The default weight for one id (0 for catalogue entries, 1 if unknown). */
+export function defaultWeightFor(id: string, optional?: boolean): number {
+  return optional ? 0 : DEFAULT_WEIGHTS[id] ?? 1;
+}
+
+/**
+ * Default weights for a set of specs. Every built-in gets its balanced default
+ * (see DEFAULT_WEIGHTS — RSI and Bollinger at 20 each, 100 in total), and the
+ * catalogue gets 0: a composite should only contain what the user — or a
+ * suggestion they accepted — put there.
+ */
+export function defaultWeights(specs: Array<{ id: string; optional?: boolean }>): WeightMap {
   const w: WeightMap = {};
-  for (const s of specs) w[s.id] = s.optional ? 0 : 1;
+  for (const s of specs) w[s.id] = defaultWeightFor(s.id, s.optional);
   return w;
 }
 
@@ -364,7 +487,7 @@ export function effectiveWeight(
   weights: WeightMap | null | undefined,
 ): number {
   const raw = weights?.[spec.id];
-  return Math.max(0, raw ?? (spec.optional ? 0 : 1));
+  return Math.max(0, raw ?? defaultWeightFor(spec.id, spec.optional));
 }
 
 /** Every spec that takes part in this computation: built-ins + any custom. */
@@ -435,6 +558,7 @@ export function computeMegaIndicator(input: MegaInput): MegaResult {
     score,
     grade: gradeFor(score),
     verdict: verdictFor(score),
+    action: actionFor(score),
     indicators,
     categories,
     contributions,
@@ -445,6 +569,34 @@ export function computeMegaIndicator(input: MegaInput): MegaResult {
       technicalCount: indicators.length,
     },
   };
+}
+
+/**
+ * Percent shares that add up to exactly 100.0 even after rounding: the raw
+ * shares are floored to one decimal and the leftover tenths are handed to the
+ * largest remainders. Without this, six equal weights display as 16.7 % each
+ * (100.2 % total) and the panel's own percentages look broken.
+ */
+export function percentShares(weights: number[]): number[] {
+  const clean = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 0));
+  const total = clean.reduce((s, w) => s + w, 0);
+  if (total <= 0) return clean.map(() => 0);
+  // Work in tenths of a percent so the rounding step is exact.
+  const tenths = clean.map((w) => (w / total) * 1000);
+  const out = tenths.map(Math.floor);
+  const left = 1000 - out.reduce((s, v) => s + v, 0);
+  const byRemainder = tenths
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac || a.i - b.i);
+  if (left > 0) {
+    for (let k = 0; k < left; k++) out[byRemainder[k % byRemainder.length].i] += 1;
+  } else if (left < 0) {
+    // Floating-point drift only — trim from the smallest remainders.
+    for (let k = 0; k < -left; k++) {
+      out[byRemainder[byRemainder.length - 1 - (k % byRemainder.length)].i] -= 1;
+    }
+  }
+  return out.map((v) => v / 10);
 }
 
 /** Score → color for UI use. */
