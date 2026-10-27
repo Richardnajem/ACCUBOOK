@@ -214,7 +214,7 @@ export default function MegaIndicatorHelp({
                   <B>What scores better</B> plus the two thresholds turn the raw reading into the
                   0–100 score. The same panel also edits the indicator itself: write a formula of
                   your own and it <B>replaces</B> the built-in calculation, and the name, unit and
-                  description become yours too. Leave a field blank to keep the built-in's — the
+                  description become yours too. Leave a field blank to keep the built-in&apos;s — the
                   box shows it as the placeholder.
                 </P>
                 <Bullets
@@ -241,7 +241,7 @@ export default function MegaIndicatorHelp({
                 />
                 <P>
                   The formula box saves when it loses focus, and something that does not compile is
-                  refused with the parser's own message rather than stored. An edited row is tagged{" "}
+                  refused with the parser&apos;s own message rather than stored. An edited row is tagged{" "}
                   <B>your formula</B> — or <B>edited</B> when only a field changed — and its rule is
                   printed under the name. <B>Reset to built-in</B> drops the whole edit;{" "}
                   <B>Exclude</B> sets the weight to 0. Edits are saved in this browser and apply
@@ -277,8 +277,8 @@ export default function MegaIndicatorHelp({
               </Card>
 
               <P>
-                Every built-in's own calculation stays readable: the ⓘ on a row and the right-click
-                panel print it under <B>How it&apos;s calculated</B>. When you replace it with a
+                Every built-in&apos;s own calculation stays readable: the ⓘ on a row and the
+                right-click panel print it under <B>How it&apos;s calculated</B>. When you replace it with a
                 formula of your own, that original is listed above your box — so an edit is always
                 readable against what it replaced, and one click away from being undone.
               </P>
