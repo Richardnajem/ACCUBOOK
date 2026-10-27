@@ -130,6 +130,27 @@ true when they change:
   from a narrow universe is a downgrade, not a fix. Change these numbers only with a
   cross-split, cross-universe measurement behind them.
 
+## Per-indicator edits are a user layer, not a measured default
+
+Every indicator can be edited in place (`IndicatorOverride` in `mega-indicator.ts`):
+its name/unit/description, its scoring rule, and `formula` — a user expression that
+**replaces** the built-in calculation, compiled by `custom-indicators.ts`'s sandbox.
+`specsWithOverrides()` applies the patch list (a missing field keeps the built-in),
+`computeMegaIndicator` and `computeMegaScoreSeries` both take the map, and the routes
+(`mega-indicator`, `mega-history`, `backtest` → `megaOverrides`) carry it from the
+browser so the live score, the history and a backtest agree. Three rules:
+
+- **The trainer never sees them.** `mega-calibration.ts` calls
+  `computeMegaScoreSeries` without the overrides on purpose: a shipped weight map
+  measured against one user's ad-hoc formula would not be the map everyone else gets.
+  Keep that separation — `DEFAULT_WEIGHTS`/`MEGA_BASELINE` stay measured on the
+  catalogue, and an edit is per-device (localStorage) like the weights themselves.
+- **A bad formula degrades, it does not lie.** One that fails `parseFormula` is
+  dropped before storage; one that compiles but yields no value keeps the built-in
+  series and records a readable error naming the id (surfaced as a warning).
+- **The history cache key includes the edits** (`hashOverrides`). An edited formula
+  changes every point, so serving the pre-edit series would be wrong, not stale.
+
 ## Trading frequency is chosen, and daily is the measured winner
 
 The backtest API/config takes `barInterval` (`daily` | `weekly` | `monthly`);

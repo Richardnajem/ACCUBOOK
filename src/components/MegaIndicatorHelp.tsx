@@ -209,10 +209,13 @@ export default function MegaIndicatorHelp({
           heading: "Formula editor — two editors, two jobs",
           body: (
             <div className="space-y-3">
-              <Card title="Right-click a row → the scoring rule">
+              <Card title="Right-click a row → its rule, its formula, its fields">
                 <P>
                   <B>What scores better</B> plus the two thresholds turn the raw reading into the
-                  0–100 score. They never change how the raw reading is calculated.
+                  0–100 score. The same panel also edits the indicator itself: write a formula of
+                  your own and it <B>replaces</B> the built-in calculation, and the name, unit and
+                  description become yours too. Leave a field blank to keep the built-in's — the
+                  box shows it as the placeholder.
                 </P>
                 <Bullets
                   items={[
@@ -237,9 +240,14 @@ export default function MegaIndicatorHelp({
                   ]}
                 />
                 <P>
-                  A changed row is tagged <B>custom</B> and its rule is printed under the name.{" "}
-                  <B>Reset formula</B> drops the override, <B>Exclude</B> sets the weight to 0.
-                  Overrides are saved in this browser.
+                  The formula box saves when it loses focus, and something that does not compile is
+                  refused with the parser's own message rather than stored. An edited row is tagged{" "}
+                  <B>your formula</B> — or <B>edited</B> when only a field changed — and its rule is
+                  printed under the name. <B>Reset to built-in</B> drops the whole edit;{" "}
+                  <B>Exclude</B> sets the weight to 0. Edits are saved in this browser and apply
+                  wherever the indicator is scored: the composite, the score history and any
+                  backtest you run afterwards. An expression that produces no value for the ticker
+                  keeps the built-in reading and says so by name instead of scoring a blank.
                 </P>
               </Card>
 
@@ -263,16 +271,16 @@ export default function MegaIndicatorHelp({
                   Saving stores it on this device and adds it to the composite at weight 1 — move it
                   like any other row. Up to <B>{MAX_CUSTOM}</B> custom indicators
                   {customCount > 0 ? ` (${customCount} defined)` : ""}; edit or remove it from its
-                  row. To change the <i>formula</i> later, reopen that editor — the right-click
-                  panel only adjusts its scoring rule.
+                  row. Its row carries an <i>Edit formula</i> button, and the right-click panel now
+                  writes the same fields — the difference is only which one you reach first.
                 </P>
               </Card>
 
               <P>
-                The exact calculation behind any built-in is read-only: the ⓘ on a row and the
-                right-click panel show it under <B>How it&apos;s calculated</B>. To keep your own
-                version of it, rebuild it in ＋ Add Indicator instead of hoping the override can
-                edit maths it cannot see.
+                Every built-in's own calculation stays readable: the ⓘ on a row and the right-click
+                panel print it under <B>How it&apos;s calculated</B>. When you replace it with a
+                formula of your own, that original is listed above your box — so an edit is always
+                readable against what it replaced, and one click away from being undone.
               </P>
             </div>
           ),

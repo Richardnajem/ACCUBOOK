@@ -95,6 +95,11 @@ leaves your machine.
   exit sessions and the Mega Score reading that triggered each side, with the fill
   day's own score beside it. The table columns and CSV export carry the same scores;
   stop-loss re-entries are flagged (↻) because they reopen without a fresh crossing.
+- **Every indicator behind a log row** — right-click a trade to pick the entry or the
+  exit bar and get that bar's full decomposition: each indicator's raw reading, its
+  0-100 score, the weight it carried and the points it added to the composite, biggest
+  contributor first. Recomputed on demand from the same weights and edits the run
+  traded, so a log row and the page agree.
 - **Strategy comparison** — run every strategy against the same ticker and rank them.
 - **Parameter optimization** — sweep strategy parameters over a grid heatmap.
 - **Frequency is a dial, not a win** — measured on 24 tickers × 15 years at 2 bps
@@ -353,10 +358,12 @@ Re-run the tab on your own universe before trusting any number here.
 | Weight slider (0–10) / box (0–20) | Per-indicator weight. Only relative shares matter — the composite divides by the weight it actually summed, so `2 / 2 / 6` scores the same as `20 / 20 / 60`. `0` excludes the indicator. |
 | `%` beside each weight | That indicator's share of the composite after renormalising. |
 | ＋ Add Indicator | Opens the catalogue (~20 extra indicators) with per-ticker suggestions. Catalogue indicators start at weight 0 and join only when you add them. |
-| Right-click an indicator → **Direction** | `Higher is better`, `Lower is better`, or `Healthy band (peak in the middle)`. Changing it re-scores the indicator and marks it `custom`. |
+| Right-click an indicator → **Direction** | `Higher is better`, `Lower is better`, or `Healthy band (peak in the middle)`. Changing it re-scores the indicator and marks the row `edited`. |
 | Right-click → **thresholds** | The two numbers that map the raw value to 0–100: `Bad (→0)` / `Good (→100)` for higher-is-better, the reverse for lower, or `Band low` / `Band high` for a band. Inside a band the score runs 60–100 with 100 at the middle; outside it falls to 0 at 75 % of a band-width past the edge. A reversed pair (`low > high`) is rejected and scores 50. |
-| Right-click → **Reset formula** | Drops your direction/threshold override for that indicator. |
-| ＋ New indicator | A custom indicator: **name**, **formula** (daily OHLCV + the listed functions; click to insert), **what scores better** (direction), **thresholds**, optional **description**. Saved on this device and scored exactly like a built-in. |
+| Right-click → **Formula** | Replaces the indicator's own calculation with your expression, evaluated bar by bar on the same daily bars by the same sandbox as ＋ New indicator. The box commits on blur; a formula that does not compile is refused with the parser's error instead of being stored, and one that yields no value for the ticker keeps the built-in reading and warns by name. The edit is applied everywhere that indicator is scored — the live composite, the score history (and so the percentile badge) and any backtest run afterwards, including its trade-log breakdown. |
+| Right-click → **Name / Unit / Description** | Your own labels for the row, the tooltip and the legend; blank keeps the built-in's wording. The built-in's calculation is still printed above your formula box. |
+| Right-click → **Reset to built-in** | Drops the whole edit for that indicator — scoring rule, labels or replacement formula. |
+| ＋ New indicator | A custom indicator: **name**, **formula** (daily OHLCV + the listed functions; click to insert), **what scores better** (direction), **thresholds**, optional **description**. Saved on this device and scored exactly like a built-in; its row's *Edit formula* button reopens the same fields the right-click panel writes. |
 | History + overlay picker | Bars used for the chart, and which indicator's own score the overlay plots under the composite. |
 | BUY/SELL bands (backtest page) | The same pair the Training tab writes, editable per run; `Reset` returns to the shipped 70 / 25. |
 
