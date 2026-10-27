@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { SortableTable, Column } from "@/components/SortableTable";
-import { loadMegaPrefs, activeMegaWeights } from "@/lib/mega-prefs";
+import { loadMegaPrefs, activeMegaWeights, activeMegaOverrides } from "@/lib/mega-prefs";
 import type { WalkForwardResult, WalkForwardFold } from "@/lib/backtest-engine";
 
 const pct = (n: number, d = 1) => `${n.toFixed(d)}%`;
@@ -49,7 +49,7 @@ export default function WalkForward({ onApply }: { onApply?: (strategyId: string
       const res = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "walkForward", symbol: ticker, strategyId: effectiveStrategyId, trainYears, testYears, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
+        body: JSON.stringify({ action: "walkForward", symbol: ticker, strategyId: effectiveStrategyId, trainYears, testYears, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined, megaOverrides: activeMegaOverrides() ?? undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Walk-forward failed");

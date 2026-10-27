@@ -3,12 +3,15 @@ import {
   mergeFormula,
   scoreWithOverride,
   isFormulaChanged,
+  isOverrideChanged,
+  hashOverrides,
   sanitizeOverrides,
   setOverride,
   clearOverride,
   formulaLabel,
   type ScoringFormula,
 } from "../src/lib/mega-overrides";
+import { applyIndicatorOverride, getSpec, MAX_OVERRIDE_DESC } from "../src/lib/mega-indicator";
 
 const base: ScoringFormula = { direction: "higher", thresholds: [0, 5] };
 
@@ -118,5 +121,121 @@ describe("formulaLabel", () => {
   it("renders each direction", () => {
     expect(formulaLabel({ direction: "higher", thresholds: [0, 5] })).toBe("higher: 0 → 5");
     expect(formulaLabel({ direction: "band", thresholds: [35, 65] })).toBe("band: 35 – 65");
+  });
+});
+
+// ─── Editing an indicator's own fields ─────────────────────────
+// The right-click editor patches any field of a built-in spec, and can REPLACE
+// its calculation with a user expression. These pin the patch semantics: a
+// missing field keeps the built-in value, and an invalid one never produces an
+// invalid spec (a reversed threshold pair would score above 100).
+
+const rsiSpec = getSpec("ta-rsi-14")!;
+
+describe("applyIndicatorOverride", () => {
+  it("returns the same spec when there is no override", () => {
+    expect(applyIndicatorOverride(rsiSpec)).toBe(rsiSpec);
+  });
+
+  it("keeps every built-in field the override does not mention", () => {
+    const patched = applyIndicatorOverride(rsiSpec, { formula: "rsi(close, 9)" });
+    expect(patched.formula).toBe("rsi(close, 9)");
+    expect(patched.name).toBe(rsiSpec.name);
+    expect(patched.unit).toBe(rsiSpec.unit);
+    expect(patched.description).toBe(rsiSpec.description);
+    expect(patched.direction).toBe(rsiSpec.direction);
+    expect(patched.thresholds).toEqual(rsiSpec.thresholds);
+    expect(patched.id).toBe(rsiSpec.id);
+    expect(patched.category).toBe(rsiSpec.category);
+  });
+
+  it("patches the text fields", () => {
+    const patched = applyIndicatorOverride(rsiSpec, {
+      name: "  My RSI  ", unit: "pts", description: "Mine", formula: " rsi(close, 9) ",
+    });
+    expect(patched.name).toBe("My RSI");
+    expect(patched.unit).toBe("pts");
+    expect(patched.description).toBe("Mine");
+    expect(patched.formula).toBe("rsi(close, 9)");
+  });
+
+  it("treats blank text as \"keep the built-in\"", () => {
+    const patched = applyIndicatorOverride(rsiSpec, { name: "   ", unit: "", formula: "" });
+    expect(patched.name).toBe(rsiSpec.name);
+    expect(patched.unit).toBe(rsiSpec.unit);
+    expect(patched.formula).toBe(rsiSpec.formula);
+  });
+
+  it("clamps the text fields like the custom editor does", () => {
+    const patched = applyIndicatorOverride(rsiSpec, {
+      name: "n".repeat(100),
+      description: "d".repeat(400),
+    });
+    expect(patched.name.length).toBeLessThanOrEqual(40);
+    expect(patched.description.length).toBe(MAX_OVERRIDE_DESC);
+  });
+
+  it("ignores a reversed or malformed threshold pair", () => {
+    expect(applyIndicatorOverride(rsiSpec, { thresholds: [80, 20] }).thresholds).toEqual(rsiSpec.thresholds);
+    expect(applyIndicatorOverride(rsiSpec, { thresholds: [1] as unknown as [number, number] }).thresholds).toEqual(rsiSpec.thresholds);
+    expect(applyIndicatorOverride(rsiSpec, { thresholds: ["a", 2] as unknown as [number, number] }).thresholds).toEqual(rsiSpec.thresholds);
+  });
+
+  it("keeps an equal pair, which is a step function", () => {
+    expect(applyIndicatorOverride(rsiSpec, { thresholds: [50, 50] }).thresholds).toEqual([50, 50]);
+  });
+});
+
+describe("isOverrideChanged", () => {
+  it("is false with no override or an identical one", () => {
+    expect(isOverrideChanged(rsiSpec)).toBe(false);
+    expect(isOverrideChanged(rsiSpec, { name: rsiSpec.name, formula: rsiSpec.formula })).toBe(false);
+  });
+
+  it("counts a formula-only, field-only or scoring edit", () => {
+    expect(isOverrideChanged(rsiSpec, { formula: "rsi(close, 9)" })).toBe(true);
+    expect(isOverrideChanged(rsiSpec, { name: "My RSI" })).toBe(true);
+    expect(isOverrideChanged(rsiSpec, { unit: "pts" })).toBe(true);
+    expect(isOverrideChanged(rsiSpec, { description: "Mine" })).toBe(true);
+    expect(isOverrideChanged(rsiSpec, { thresholds: [10, 90] })).toBe(true);
+  });
+});
+
+describe("sanitizeOverrides — the new fields", () => {
+  it("keeps a formula that compiles", () => {
+    const out = sanitizeOverrides({ "ta-rsi-14": { formula: "rsi(close, 9)" } });
+    expect(out).toEqual({ "ta-rsi-14": { formula: "rsi(close, 9)" } });
+  });
+
+  it("drops a formula that does not compile, keeping the rest of the edit", () => {
+    const out = sanitizeOverrides({
+      "ta-rsi-14": { formula: "nope(close, 9)", name: "My RSI" },
+    });
+    expect(out).toEqual({ "ta-rsi-14": { name: "My RSI" } });
+  });
+
+  it("keeps text fields, trimmed and capped", () => {
+    const out = sanitizeOverrides({
+      "ta-rsi-14": { name: "  Mine  ", unit: " pts ", description: "d".repeat(400) },
+    });
+    expect(out["ta-rsi-14"].name).toBe("Mine");
+    expect(out["ta-rsi-14"].unit).toBe("pts");
+    expect(out["ta-rsi-14"].description!.length).toBe(MAX_OVERRIDE_DESC);
+  });
+
+  it("ignores blank text so it cannot blank out a built-in", () => {
+    expect(sanitizeOverrides({ "ta-rsi-14": { name: "  ", unit: "" } })).toEqual({});
+  });
+});
+
+describe("hashOverrides", () => {
+  it("is stable for the same content and different for a changed edit", () => {
+    expect(hashOverrides(undefined)).toBe("0");
+    expect(hashOverrides({})).toBe("0");
+    const a = hashOverrides({ "ta-rsi-14": { formula: "rsi(close, 9)" } });
+    expect(hashOverrides({ "ta-rsi-14": { formula: "rsi(close, 9)" } })).toBe(a);
+    expect(hashOverrides({ "ta-rsi-14": { formula: "rsi(close, 21)" } })).not.toBe(a);
+    expect(hashOverrides({ "ta-rsi-14": { formula: "rsi(close, 9)", name: "Mine" } })).not.toBe(a);
+    expect(hashOverrides({ "ta-rsi-14": { thresholds: [1, 2] } })).not.toBe("0");
   });
 });

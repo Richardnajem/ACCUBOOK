@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { loadMegaPrefs, activeMegaWeights } from "@/lib/mega-prefs";
+import { loadMegaPrefs, activeMegaWeights, activeMegaOverrides } from "@/lib/mega-prefs";
 import type { OptimizeResult, OptimizePoint } from "@/lib/backtest-engine";
 
 const pct = (n: number, d = 1) => `${n.toFixed(d)}%`;
@@ -62,7 +62,7 @@ export default function ParamOptimizer({ onApply }: { onApply?: (strategyId: str
       const res = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "optimizeStrategy", symbol: ticker, strategyId: effectiveStrategyId, years, initialCapital: 100000, commissionBps: 2, slippageBps: 2, positionPct: 100, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined }),
+        body: JSON.stringify({ action: "optimizeStrategy", symbol: ticker, strategyId: effectiveStrategyId, years, initialCapital: 100000, commissionBps: 2, slippageBps: 2, positionPct: 100, minTrades: minTrades > 0 ? minTrades : undefined, megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined, megaOverrides: activeMegaOverrides() ?? undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Optimization failed");

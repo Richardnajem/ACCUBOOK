@@ -4,7 +4,7 @@
 
 import { sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin } from "./ta";
 import { computeMegaScoreSeries } from "./mega-score";
-import { MEGA_BUY_ABOVE, MEGA_SELL_BELOW, type WeightMap } from "./mega-indicator";
+import { MEGA_BUY_ABOVE, MEGA_SELL_BELOW, type IndicatorOverrideMap, type WeightMap } from "./mega-indicator";
 
 export interface StrategyParam {
   key: string;
@@ -35,6 +35,9 @@ export interface StrategyContext {
   params: Record<string, number>;
   /** Per-indicator weights for the Mega Score strategy (default: all 1). */
   megaWeights?: WeightMap;
+  /** Per-indicator formula/field edits from the Mega Indicator page, so the
+   *  backtest scores the same indicators the UI shows. */
+  megaOverrides?: IndicatorOverrideMap;
 }
 
 // ─── 1. SMA Crossover ("Golden Cross" / "Death Cross") ─────────
@@ -210,6 +213,29 @@ const momentumStrategy: StrategyDef = {
   },
 };
 
+/**
+ * The Mega Score regime rule, using the Mega Indicator's baseline strictness:
+ * a long opens when the score is AT OR ABOVE the entry level and closes only
+ * when it is STRICTLY BELOW the exit level. That is exactly the badge on the
+ * Mega Indicator page (BUY ≥ 70 · HOLD 25–70 · SELL < 25, i.e. MEGA_BASELINE),
+ * so a reading sitting on 25 stays long instead of being sold for being "at the
+ * level".
+ *
+ * Exported so the boundary itself can be tested, not just real-data behaviour.
+ */
+export function megaRegimePosition(smoothed: number[], entry: number, exit: number): number[] {
+  const pos = new Array(smoothed.length).fill(0);
+  let inPos = false;
+  for (let i = 0; i < smoothed.length; i++) {
+    if (Number.isFinite(smoothed[i])) {
+      if (!inPos && smoothed[i] >= entry) inPos = true;
+      else if (inPos && smoothed[i] < exit) inPos = false;
+    }
+    pos[i] = inPos ? 1 : 0;
+  }
+  return pos;
+}
+
 // ─── 8. Mega Score regime (composite technical health filter) ──
 const megaScore: StrategyDef = {
   id: "mega_score",
@@ -217,33 +243,110 @@ const megaScore: StrategyDef = {
   description:
     "Trades the app's own composite Mega Score (0-100, a weighted blend of the ~150 causal technical indicators). " +
     "Entry score = buy at or above it: the score has to reach that level before a long position is opened. " +
-    "Exit score = sell at or below it: the score has to fall to that level before the position is closed. " +
+    "Exit score = sell strictly below it: the score has to fall under that level before the position is closed, so a reading sitting exactly on it is still held. " +
     "Between the two the strategy holds whatever it already has, and the gap between them is the no-trade band that stops it flipping on noise. " +
     `Defaults are the Mega Indicator baseline (entry ${MEGA_BUY_ABOVE}, exit ${MEGA_SELL_BELOW}); lower bands trade more often, higher bands wait for a stronger reading, and a wider gap means fewer, longer trades. ` +
     "Entry must stay at or above exit. Signals fill at the next day's open and every input indicator uses trailing windows only (no look-ahead).",
   params: [
     { key: "entry", label: "Entry score (buy ≥)", default: MEGA_BUY_ABOVE, min: 10, max: 90 },
-    { key: "exit", label: "Exit score (sell ≤)", default: MEGA_SELL_BELOW, min: 5, max: 85 },
+    { key: "exit", label: "Exit score (sell <)", default: MEGA_SELL_BELOW, min: 5, max: 85 },
     { key: "smooth", label: "Score smoothing (days)", default: 5, min: 1, max: 60 },
   ],
   minBars: 210,
   validate: (p) => p.entry >= p.exit,
-  generate: ({ open, high, low, close, volume, params, megaWeights }) => {
+  generate: ({ open, high, low, close, volume, params, megaWeights, megaOverrides }) => {
     // Honors the user's Mega Indicator weights (from the Mega Indicator page,
     // piped through config) so the backtest trades the same composite the UI shows.
-    const { score } = computeMegaScoreSeries({ high, low, close, volume, open }, megaWeights);
+    const { score } = computeMegaScoreSeries({ high, low, close, volume, open }, megaWeights, undefined, megaOverrides);
     // Optional smoothing of the composite (trailing SMA — causal).
     const s = params.smooth > 1 ? sma(score, Math.round(params.smooth)) : score;
-    const pos = new Array(close.length).fill(0);
-    let inPos = false;
-    for (let i = 0; i < close.length; i++) {
-      if (Number.isFinite(s[i])) {
-        if (!inPos && s[i] >= params.entry) inPos = true;
-        else if (inPos && s[i] <= params.exit) inPos = false;
-      }
-      pos[i] = inPos ? 1 : 0;
-    }
-    return pos;
+    return megaRegimePosition(s, params.entry, params.exit);
+  },
+};
+
+/**
+ * The FAST Mega Score rule: buy when the score is high enough AND rising, leave
+ * when it drops under the exit level, when its velocity rolls over, or when the
+ * engine's ATR trailing stop is hit.
+ *
+ * Why a second rule exists: `megaRegimePosition` reads the composite as a slow
+ * state — it stays above 70 for months, so the rule closes ~1.4 trades per
+ * symbol per 4 years and behaves like buy & hold plus a drawdown filter. This
+ * rule adds the missing dimension (change, not level): `velocity = score[i] −
+ * score[i − window]` has to be positive to buy and must not turn negative while
+ * long. The band is only a gate; most entries and exits come from velocity, and
+ * the trailing stop bounds the damage of the ones that go wrong.
+ *
+ * Both legs read the SMOOTHED score on the signal bar and fill at the next
+ * open (the simulator does that), so there is no look-ahead. Exported so the
+ * rule can be tested on a hand-built series.
+ */
+export function megaVelocityPosition(
+  smoothed: number[],
+  entry: number,
+  exit: number,
+  velWindow: number,
+  velMin: number
+): number[] {
+  const n = smoothed.length;
+  const pos = new Array(n).fill(0);
+  const win = Math.max(1, Math.round(velWindow));
+  let inPos = false;
+  for (let i = win; i < n; i++) {
+    const now = smoothed[i];
+    const then = smoothed[i - win];
+    if (!Number.isFinite(now) || !Number.isFinite(then)) { pos[i] = inPos ? 1 : 0; continue; }
+    const velocity = now - then;
+    if (!inPos && now >= entry && velocity >= velMin) inPos = true;
+    else if (inPos && (now < exit || velocity <= -velMin)) inPos = false;
+    pos[i] = inPos ? 1 : 0;
+  }
+  return pos;
+}
+
+// ─── 8b. Mega Score Fast (velocity + ATR trail) ────────────────
+//
+// MEASURED — Oct 2026, cached daily bars, 24 tickers × 15 years (the Mega Score
+// calibration universe incl. the volatile block), 2 bps commission + 2 bps
+// slippage, chronological full / last-40 % / last-30 % windows, and the same
+// ATR-trail test included. 108 parameter sets were run. Result, in one line:
+// MORE TRADES DID NOT PAY. The best fast cell (e65 / x35 / smooth 5 / vel 20
+// points per 10 days / trail 4×ATR) made 2.7 trades per ticker per year — about
+// 40× the slow rule — won 45 % of them at +5.7 % average (net of costs), stayed
+// invested 45-48 % of the time and finished 0.20 excess Sharpe BEHIND buy &
+// hold on all three windows. The slow 70/25 rule on the same data: 0.07 trades
+// per ticker per year, +0.01 / +0.01 / +0.08. Every step toward more trading
+// (looser trail, lower velocity bar, shorter smoothing) moved the result further
+// from the benchmark, not closer: the composite's week-to-week move has no
+// per-trade edge that survives the time spent out of the market.
+//
+// So this strategy ships opt-in and with its own measured defaults, and its
+// description says what the run showed. It is a research tool, not the
+// recommended rule — 70/25 still is.
+const megaScoreFast: StrategyDef = {
+  id: "mega_score_fast",
+  name: "Mega Score Fast (velocity + ATR trail)",
+  description:
+    "The trading variant of the Mega Score: it buys when the score is at or above the entry level AND has climbed by at least the velocity threshold over the last N days, and it leaves when the score drops under the exit level, when its velocity rolls over, or when price closes the ATR trailing stop." +
+    " The band is only a gate, not the trigger: a high score that has stopped rising does not buy, and a still-high score that starts falling does not hold." +
+    " Trailing stop = ATR(period) × multiple below the highest close since entry, tested against the previous bar's level so it cannot see the bar it fills in; after a trail exit the rule waits for the signal to go flat before re-buying." +
+    " Measured on 24 tickers × 15 years (2 bps each way): the defaults trade ~2.7 times per ticker per year and end 0.20 excess Sharpe BEHIND buy & hold, against +0.01 for the slow 70/25 rule. More trades did not pay on this signal — this is here to be tested, not because it won.",
+  params: [
+    { key: "entry", label: "Entry score (buy ≥)", default: 65, min: 10, max: 90 },
+    { key: "exit", label: "Exit score (sell <)", default: 35, min: 5, max: 85 },
+    { key: "smooth", label: "Score smoothing (days)", default: 5, min: 1, max: 60 },
+    { key: "velWindow", label: "Velocity window (days)", default: 10, min: 2, max: 60 },
+    { key: "velMin", label: "Min velocity (score points)", default: 20, min: 0, max: 30, step: 0.5 },
+    { key: "trailAtr", label: "ATR trail multiple", default: 4, min: 0, max: 10, step: 0.5 },
+    { key: "atrPeriod", label: "ATR period", default: 14, min: 2, max: 100 },
+  ],
+  minBars: 210,
+  validate: (p) => p.entry >= p.exit && p.velWindow >= 2,
+  generate: ({ open, high, low, close, volume, params, megaWeights, megaOverrides }) => {
+    const { score } = computeMegaScoreSeries({ high, low, close, volume, open }, megaWeights, undefined, megaOverrides);
+    const smooth = Math.max(1, Math.round(params.smooth || 1));
+    const s = smooth > 1 ? sma(score, smooth) : score;
+    return megaVelocityPosition(s, params.entry, params.exit, params.velWindow, params.velMin);
   },
 };
 
@@ -268,6 +371,7 @@ export const STRATEGIES: StrategyDef[] = [
   turtleStrategy,
   momentumStrategy,
   megaScore,
+  megaScoreFast,
   buyHold,
 ];
 

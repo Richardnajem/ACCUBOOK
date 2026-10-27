@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMegaHistory } from "@/lib/mega-history";
-import type { WeightMap } from "@/lib/mega-indicator";
+import type { IndicatorOverrideMap, WeightMap } from "@/lib/mega-indicator";
 import { sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
+import { sanitizeOverrides } from "@/lib/mega-overrides";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,7 +42,17 @@ export async function GET(request: NextRequest) {
       } catch { /* ignore malformed custom defs */ }
     }
 
-    const result = await getMegaHistory(ticker, weights, years, custom);
+    // Per-indicator edits from the right-click editor, so the history the badge
+    // and the chart compare against is the same composite the page displays.
+    let overrides: IndicatorOverrideMap = {};
+    const overridesParam = searchParams.get("overrides");
+    if (overridesParam) {
+      try {
+        overrides = sanitizeOverrides(JSON.parse(overridesParam));
+      } catch { /* ignore malformed overrides */ }
+    }
+
+    const result = await getMegaHistory(ticker, weights, years, custom, overrides);
     return NextResponse.json(result);
   } catch (e) {
     return NextResponse.json(

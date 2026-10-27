@@ -107,6 +107,33 @@ const BASE_SCHEMA_SQL = `
     );
 `;
 
+// Intraday bars for day-trading research (src/lib/intraday-data.ts). Kept apart
+// from price_bars on purpose: those are daily closes, these are timestamps, and
+// mixing the two in one table would let a daily backtest accidentally read a
+// minute series.
+export const INTRADAY_TABLES_SQL = `
+  CREATE TABLE IF NOT EXISTS intraday_bars (
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    PRIMARY KEY (symbol, timeframe, ts)
+  );
+  CREATE TABLE IF NOT EXISTS intraday_meta (
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    first_ts TEXT,
+    last_ts TEXT,
+    source TEXT,
+    fetched_at TEXT,
+    PRIMARY KEY (symbol, timeframe)
+  );
+`;
+
 // ─── Schema migrations ──────────────────────────────────────────
 // Versioned with PRAGMA user_version: each step runs exactly once, in order,
 // inside a transaction that also bumps the version. Until now the schema was
@@ -118,6 +145,9 @@ const MIGRATIONS: Array<(d: Database.Database) => void> = [
     // Same statement market-data.ts runs, so there is exactly one definition
     // of these tables and both connections see them.
     d.exec(PRICE_TABLES_SQL);
+  },
+  (d) => {
+    d.exec(INTRADAY_TABLES_SQL);
   },
 ];
 

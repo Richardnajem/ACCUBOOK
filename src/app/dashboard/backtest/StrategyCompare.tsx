@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { SortableTable, Column } from "@/components/SortableTable";
-import { loadMegaPrefs, activeMegaWeights } from "@/lib/mega-prefs";
+import { loadMegaPrefs, activeMegaWeights, activeMegaOverrides } from "@/lib/mega-prefs";
+import { BAR_INTERVALS, cadenceLabel, type BarInterval } from "@/lib/bar-resample";
 import type { ComparisonResult } from "@/lib/backtest-engine";
 
 const pct = (n: number, d = 1) => `${n.toFixed(d)}%`;
@@ -16,6 +17,7 @@ const yearLabel = (y: number) => (y < 1 ? (Math.round(y * 12) === 1 ? "1M" : "6M
 export default function StrategyCompare() {
   const [ticker, setTicker] = useState("AAPL");
   const [years, setYears] = useState(10);
+  const [barInterval, setBarInterval] = useState<BarInterval>("daily");
   const [capital, setCapital] = useState(100000);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +38,9 @@ export default function StrategyCompare() {
           commissionBps: 2,
           slippageBps: 2,
           positionPct: 100,
+          barInterval,
           megaWeights: activeMegaWeights(true, loadMegaPrefs()) ?? undefined,
+          megaOverrides: activeMegaOverrides() ?? undefined,
         }),
       });
       const data = await res.json();
@@ -73,6 +77,19 @@ export default function StrategyCompare() {
     { key: "winRate", header: "Win %", align: "right", render: (r) => pct(r.winRate, 0) },
     { key: "profitFactor", header: "PF", align: "right", render: (r) => (r.profitFactor >= 99 ? "∞" : r.profitFactor.toFixed(2)) },
     { key: "totalTrades", header: "Trades", align: "right" },
+    { key: "tradesPerYear", header: "Trades/yr", align: "right", render: (r) => r.tradesPerYear.toFixed(1) },
+    {
+      key: "avgTradeReturnPct", header: "Avg trade", align: "right",
+      render: (r) => <span className={r.avgTradeReturnPct >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>{pct(r.avgTradeReturnPct, 2)}</span>,
+    },
+    {
+      key: "riskFactor", header: "Risk", align: "right",
+      render: (r) => (
+        <span title={`Risk factor ${r.riskFactor.toFixed(0)}/100 — ${r.riskLevel} (40 % vol vs buy & hold + 35 % ulcer + 25 % drawdown)`}>
+          {r.riskFactor.toFixed(0)} <span className="text-[10px] text-[var(--muted)]">{r.riskLevel}</span>
+        </span>
+      ),
+    },
     { key: "timeInMarketPct", header: "Exposure", align: "right", render: (r) => pct(r.timeInMarketPct, 0) },
     {
       key: "beatsBuyHold", header: "vs B&H", align: "center",
@@ -129,7 +146,20 @@ export default function StrategyCompare() {
             </div>
           </div>
           <div>
-            <label className="block text-xs text-[var(--muted)] mb-1">Initial capital ($)</label>
+            <label className="block text-xs text-[var(--muted)] mb-1">Trading frequency</label>
+            <div className="flex flex-wrap gap-1 mt-1">
+              {BAR_INTERVALS.map(iv => (
+                <button key={iv} onClick={() => setBarInterval(iv)}
+                  className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${barInterval === iv ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
+                  {iv.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-[var(--muted)] mt-1.5">
+              Every strategy is re-run on bars of this length (the daily series is resampled first), so the comparison
+              also answers how much trading frequency itself is worth.
+            </p>
+            <label className="block text-xs text-[var(--muted)] mb-1 mt-3">Initial capital ($)</label>
             <input type="number" value={capital} min={1000} step={1000} onChange={(e) => setCapital(Number(e.target.value))}
               className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
             <button onClick={run} disabled={running || !ticker}
@@ -149,7 +179,8 @@ export default function StrategyCompare() {
         <>
           <div className="glass rounded-xl p-4 flex flex-wrap items-center gap-x-8 gap-y-2 text-sm">
             <span><span className="text-[var(--muted)] text-xs">Ticker:</span> <b>{result.symbol}</b> · {result.meta.name}</span>
-            <span><span className="text-[var(--muted)] text-xs">Window:</span> {result.dateFrom} → {result.dateTo} ({result.bars} bars, {result.dataSource})</span>
+            <span><span className="text-[var(--muted)] text-xs">Window:</span> {result.dateFrom} → {result.dateTo} · {cadenceLabel({ barMinutes: result.barMinutes, periodsPerYear: result.periodsPerYear, barUnit: result.barUnit }, result.bars)} · {result.dataSource}</span>
+            <span><span className="text-[var(--muted)] text-xs">Annualised on:</span> {result.periodsPerYear} periods/year</span>
             <span><span className="text-[var(--muted)] text-xs">Buy&amp;Hold:</span> <b className={bench >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>{pct(bench)}</b> (Sharpe {result.benchmarkSharpe.toFixed(2)}, DD {pct(-result.benchmarkMaxDrawdownPct)})</span>
           </div>
 

@@ -7,9 +7,10 @@ import {
   balanceOfPower, cmo, percentSlope,
   connorsRsi, coppock, pmo, dpo, emv, atrStop,
 } from "@/lib/ta";
-import { ALL_SPECS, MA_PERIODS, computeMegaIndicator, defaultWeights, WeightMap } from "@/lib/mega-indicator";
+import { ALL_SPECS, MA_PERIODS, computeMegaIndicator, defaultWeights, WeightMap, type IndicatorOverrideMap } from "@/lib/mega-indicator";
 import { suggestIndicators, median, type SuggestionContext } from "@/lib/indicator-suggestions";
-import { evaluateCustom, sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
+import { evalFormulaLast, evaluateCustom, sanitizeCustomList, type CustomIndicatorDef } from "@/lib/custom-indicators";
+import { sanitizeOverrides } from "@/lib/mega-overrides";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,13 +24,17 @@ interface TechnicalRaw {
   error: string | null;
   /** Spec objects for user-defined indicators that evaluated successfully. */
   customSpecs: ReturnType<typeof evaluateCustom>["specs"];
-  /** Readable failures from built-in data loading or custom formulas. */
+  /** Readable failures from built-in data loading, custom formulas or edits. */
   warnings: string[];
   /** The market state the indicator suggester reads (null when there is no data). */
   context: SuggestionContext | null;
 }
 
-async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[]): Promise<TechnicalRaw> {
+async function technicalRaw(
+  ticker: string | null,
+  custom: CustomIndicatorDef[],
+  overrides: IndicatorOverrideMap,
+): Promise<TechnicalRaw> {
   const empty: TechnicalRaw = {
     values: {}, asOf: null, dataSource: "none", ticker: null, error: null,
     customSpecs: [], warnings: [], context: null,
@@ -273,8 +278,7 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         })
       : null;
 
-    return {
-      values: {
+    const values: Record<string, number> = {
         "ta-trend-50-200": trend,
         "ta-rsi-14": rsiVal,
         "ta-macd-hist": macdHist,
@@ -319,13 +323,40 @@ async function technicalRaw(ticker: string | null, custom: CustomIndicatorDef[])
         "ta-dist-52w-low": dist52Low,
         ...maValues,
         ...(customRes?.values ?? {}),
-      },
+    };
+
+    // ─── User-edited calculations ─────────────────────────────────
+    // An indicator whose formula the user replaced is evaluated from that
+    // expression over the same bars (the same sandbox as a custom indicator),
+    // and its value replaces the built-in one. A formula that fails to produce
+    // a value keeps the built-in reading and is reported rather than silently
+    // scoring something else.
+    const warnings: string[] = [...(customRes?.errors ?? [])];
+    for (const [id, ov] of Object.entries(overrides)) {
+      const formula = ov?.formula?.trim();
+      if (!formula) continue;
+      if (!ALL_SPECS.some((s) => s.id === id)) continue;
+      try {
+        const edited = evalFormulaLast(formula, {
+          open: bars.map((b) => b.open), high, low, close, volume,
+        });
+        if (Number.isFinite(edited)) values[id] = edited;
+        else warnings.push(`Your formula for ${id} produced no value — the built-in calculation is still in use.`);
+      } catch (e) {
+        warnings.push(
+          `Your formula for ${id} could not be evaluated (${e instanceof Error ? e.message : "invalid"}) — the built-in calculation is still in use.`
+        );
+      }
+    }
+
+    return {
+      values,
       asOf: bars[last].date,
       dataSource: source,
       ticker: meta.symbol,
       error: null,
       customSpecs: customRes?.specs ?? [],
-      warnings: customRes?.errors ?? [],
+      warnings,
       context,
     };
   } catch (e) {
@@ -384,7 +415,18 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const technical = await technicalRaw(ticker, custom);
+    // Per-indicator edits (a replacement formula and/or the other fields) from
+    // the right-click editor. A malformed map is ignored rather than failing the
+    // request, so the page falls back to the built-in readings.
+    let overrides: IndicatorOverrideMap = {};
+    const overridesParam = searchParams.get("overrides");
+    if (overridesParam) {
+      try {
+        overrides = sanitizeOverrides(JSON.parse(overridesParam));
+      } catch { /* ignore malformed overrides */ }
+    }
+
+    const technical = await technicalRaw(ticker, custom, overrides);
 
     // Catalogue indicators start outside the composite, so the default weight map
     // turns every optional spec off until the user adds it.
@@ -403,6 +445,7 @@ export async function GET(request: NextRequest) {
       custom: technical.customSpecs,
       weights: effectiveWeights,
       excluded,
+      overrides,
       meta: {
         asOf: technical.asOf,
         ticker: technical.ticker,

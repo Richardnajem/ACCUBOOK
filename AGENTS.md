@@ -43,11 +43,14 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 |---|---|
 | `db.ts` | **SQLite access** — the storage layer everything else uses |
 | `portfolio.ts` | Holdings / trades aggregation |
-| `market-data.ts`, `quote-sources.ts`, `live-quotes.ts` | Price fetching & caching |
+| `market-data.ts`, `quote-sources.ts`, `live-quotes.ts` | Price fetching & caching (daily bars, live quotes) |
+| `intraday-data.ts` | **Intraday history** (Alpaca, minute/hour bars) for day-trading research: key from env, paginated REST, SQLite cache in `intraday_bars`/`intraday_meta`, pure `mapAlpacaBars`/`aggregateBars` helpers |
 | `price-import.ts` | Importing prices |
-| `ta.ts`, `strategies.ts`, `backtest-engine.ts` | Technical analysis + backtesting |
+| `bar-resample.ts` | **Trading frequency**: resamples daily bars to weekly/monthly and derives the cadence (`barMinutes`, `periodsPerYear`, `barUnit`) every metric is annualized on |
+| `ta.ts`, `strategies.ts`, `backtest-engine.ts` | Technical analysis + backtesting. `strategies.ts` holds the catalogue: the slow **Mega Score Regime** (`mega_score`, 70/25) and the opt-in **Mega Score Fast** (`mega_score_fast`: velocity entry + ATR trailing stop, defaults measured). `backtest-engine.ts` owns the simulation, the trailing-stop exit, and the metrics (incl. the 0-100 risk factor). |
 | `custom-indicators.ts`, `indicator-suggestions.ts` | Indicator definitions |
 | `mega-indicator.ts`, `mega-score.ts`, `mega-overrides.ts`, `mega-prefs.ts`, `mega-history.ts` | The "mega indicator" scoring system |
+| `mega-calibration.ts` | **Training** the mega system: weights + buy/sell bands fitted on a chronological train window, scored on the held-out tail (coordinate descent over grouped indicators, benchmark-relative objective, trial-count/deflated-Sharpe diagnostic) |
 | `backup.ts`, `export.ts` | Backup / export |
 | `undo-redo.tsx` | Undo/redo provider |
 | `errorLogger.ts` | **Client error logging** (localStorage `stockfolio-error-log`) |
@@ -62,8 +65,13 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | Storage schema / queries | `src/lib/db.ts` |
 | Portfolio math | `src/lib/portfolio.ts` |
 | Indicator / scoring logic | `src/lib/mega-*.ts`, `src/lib/custom-indicators.ts` |
+| The composite's default weights or BUY/SELL bands | `src/lib/mega-indicator.ts` (`DEFAULT_WEIGHTS`, `MEGA_BASELINE`) — **re-derive them**, don't hand-edit: Backtest → 🎓 Train Weights, or `npm run test:calibrate` |
+| The training tab itself | `src/lib/mega-calibration.ts`, `src/app/api/mega-train/route.ts`, `src/app/dashboard/backtest/TrainingLab.tsx` |
 | Price sources | `src/lib/quote-sources.ts`, `src/lib/live-quotes.ts` |
 | Backtesting | `src/lib/backtest-engine.ts`, `src/app/dashboard/backtest/` |
+| Intraday / day-trading research | `src/lib/intraday-data.ts` + `tests/intraday-live.test.ts` (`INTRADAY_LIVE=1`, needs `ALPACA_API_KEY_ID`/`ALPACA_API_SECRET_KEY`); day-trading mode is the engine's `flatAtSessionEnd` |
+| Adding or retuning a strategy | `src/lib/strategies.ts` — every strategy carries its params, its causal signal, and (if it has one) the dated measurement behind its defaults |
+| Backtest metrics (risk factor, trade stats) | `RiskMetrics` + `BacktestSummary` in `src/lib/backtest-engine.ts`, cards in `src/app/dashboard/backtest/StockBacktest.tsx` |
 | Shared UI | `src/components/` |
 | Error logging | `src/lib/errorLogger.ts`, `src/app/global-error.tsx` |
 | Company research (profile, statements, ratios, valuation, filings) | `src/lib/research.ts`, `src/app/api/research/route.ts`, `src/app/dashboard/research/page.tsx` |
@@ -96,6 +104,101 @@ one requires the `workflow` token scope; the current `gh` login has only
 `gist`, `read:org` and `repo`. Grant it once with
 `gh auth refresh -h github.com -s workflow` if the numbering step should move
 into Actions.
+
+## Mega Score weights and bands are measured, not chosen
+
+`DEFAULT_WEIGHTS` and `MEGA_BASELINE` in `src/lib/mega-indicator.ts` carry dated
+comments with the run behind them (24 tickers × 15 years — the 16 index/large caps
+plus a high-volatility block — 60/40 · 70/30 · 80/20 splits). Two things must stay
+true when they change:
+
+- **The objective is relative to buy & hold.** Raw Sharpe quietly rewards staying
+  fully invested — the first version of the trainer "learned" to hold 95 % of the
+  time and trade 1.4 times per symbol, i.e. buy & hold with extra steps.
+- **Bands are judged against the score's own distribution.** The composite sits at
+  p10 ≈ 50 / median ≈ 65 / p90 ≈ 75, so a 35 exit (the old value) sits below the
+  10th percentile: it exited mid-range, re-entered near the top, and its re-entries
+  won ~50 % of the time. That is where the loss trades came from. Measured Oct 2026
+  across entry 55-85 × exit 20-50: nothing stricter than 70/25 pays — each extra
+  exit point costs more return than it saves in drawdown (80/40 = 9.8 pt of
+  drawdown for 0.48 Sharpe).
+- **One retrain is not evidence for a new map.** The trainer's objective sees ~1.4
+  trades per symbol, so it cannot separate weight maps by more than noise; a
+  12-retrain stability check (2 universes × 3 splits × catalogue off/on) moved every
+  axis in both directions except volume-vs-20-day. Training on the large-cap-only
+  half also *loses* out of sample (−0.11 excess Sharpe vs −0.02), so a "trained" map
+  from a narrow universe is a downgrade, not a fix. Change these numbers only with a
+  cross-split, cross-universe measurement behind them.
+
+## Trading frequency is chosen, and daily is the measured winner
+
+The backtest API/config takes `barInterval` (`daily` | `weekly` | `monthly`);
+`loadBars` resamples before `simulateCore`, so one chooser tests all three with
+identical costs. Measured Oct 2026 on 24 tickers × 15 years (full + last 40 % +
+last 30 %), shipped 70/25: daily **+0.01 / +0.01 / +0.08** excess Sharpe, weekly
+−0.01 / −0.10 / −0.02, monthly −0.10 / −0.07 / **no trades at all** on the tail.
+Two rules follow:
+
+- **Monthly cannot be judged on 15 years.** The composite needs 200- and 252-bar
+  windows; a 15-year monthly series is ~180 bars, so the score is partly undefined
+  and a monthly run can be silent. `loadBars` therefore validates `minBars` against
+  the RAW daily series and the engine warns when a resampled run is shorter than the
+  strategy expects — keep that warning rather than raising the limit, and present a
+  monthly result only with the bar count beside it.
+- **Annualisation is per frequency, never 252 by default.** 52 weekly, 12 monthly,
+  252 × 390/minutes intraday — all derived in `barCadence()`. Any new metric must
+  read `summary.periodsPerYear`, not hard-code a number.
+
+The weights were re-checked at weekly and monthly on the volatile subset and the
+shipped balanced map still wins (weekly 0.00 vs −0.12 flat; monthly −0.10 vs −0.19),
+so it stays as measured — do not hand-tune it from a single frequency's result.
+
+## Intraday runs must not borrow daily assumptions
+
+`Bar[]` carries daily and intraday series through the same engine, so two things are
+derived from the data instead of assumed:
+
+- **Annualisation.** Sharpe/Sortino/volatility use `sqrt(periodsPerYear)`, where
+  `periodsPerYear` comes from the median bar spacing (252 daily, 252 × 390/minutes
+  intraday). Re-hardcoding 252 would inflate an intraday Sharpe by ~8.8× at 5-minute
+  bars. `summary.barMinutes` and `summary.periodsPerYear` are printed with every run.
+- **Sessions.** Day-trading mode (`config.flatAtSessionEnd`) closes at each session's
+  last bar and refuses entries whose fill would land overnight; it is ignored, with a
+  warning, when the series is daily. Session identity is the UTC date prefix of the
+  timestamp, so an intraday test is always flat across the overnight gap.
+
+The Alpaca free tier is IEX-only (~2-3 % of consolidated volume): a result on it is
+"what this does on a thin tape", and the harness prints the feed it used. Never
+present an intraday measurement without that caveat, and never present one from a
+single ticker or a single month.
+
+## Trading frequency is measured, and more of it lost
+
+`mega_score_fast` exists so "trade more often?" can be answered with numbers instead
+of intuition. Same harness, 24 tickers × 15 years, 2 bps each way, full window plus
+both held-out tails (108 parameter sets): the slow 70/25 rule makes 0.07 trades per
+ticker per year (+0.01 / +0.01 / +0.08 excess Sharpe) and the best fast cell makes
+2.71 (46 % win rate, +5.9 % per trade, −0.20 / −0.36 / −0.24). More trades bought a
+real drawdown cut (56 % → 43 %) and paid 20-36 points of Sharpe for it. Two rules
+follow from that:
+
+- **Do not raise the bands to trade more.** Every stricter cell of the 55-85 × 20-50
+  grid was measured; looser is the only direction that keeps the rule invested.
+- **Do not ship a fast variant without its measurement.** If the defaults are ever
+  changed, re-run the sweep (temporary harness on cached bars — the numbers are in
+  the comment above `megaScoreFast`) and update the comment and README table with it.
+
+Also measured: on the full window 70/25 closed one trade on 22 of 24 tickers — the
+score never reached 25 on them (floor 23-34), so that rule is buy & hold plus a
+never-fired guardrail. Do not describe it as an active strategy.
+
+The training run is deterministic (no RNG), so re-running it on the same universe
+and window must reproduce the same weights. `tests/mega-calibration.test.ts` pins
+the engine's rules on synthetic data; `tests/mega-calibration-live.test.ts` is the
+opt-in real-data harness (`npm run test:calibrate`, network required) that prints
+the side-by-side comparison a human then decides on. Run it through the script,
+not raw vitest: without `--disableConsoleIntercept` Vitest captures console and the
+whole report is invisible, so the run looks like it passed with nothing to show.
 
 ## Error logging
 

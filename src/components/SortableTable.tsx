@@ -31,6 +31,8 @@ interface SortableTableProps<T> {
   footer?: ReactNode;
   className?: string;
   onRowClick?: (row: T) => void;
+  /** Right-click a row — used for "what was each indicator doing here?" menus. */
+  onRowContextMenu?: (row: T, e: React.MouseEvent<HTMLTableRowElement>) => void;
   rowKey?: (row: T, index: number) => string | number;
   /** Seed/override the search box from outside (e.g. a ?q= URL param). */
   externalSearch?: string;
@@ -45,6 +47,7 @@ export function SortableTable<T extends object>({
   footer,
   className = "",
   onRowClick,
+  onRowContextMenu,
   rowKey,
   externalSearch,
 }: SortableTableProps<T>) {
@@ -222,6 +225,7 @@ export function SortableTable<T extends object>({
                 <tr
                   key={rowKey ? rowKey(row, idx) : idx}
                   onClick={() => onRowClick?.(row)}
+                  onContextMenu={onRowContextMenu ? (e) => { e.preventDefault(); onRowContextMenu(row, e); } : undefined}
                   className={`border-b border-[var(--card-border)] hover:bg-[var(--table-row-hover)] transition-colors ${onRowClick ? "cursor-pointer" : ""}`}
                 >
                   {columns.map((col) => (

@@ -20,13 +20,56 @@ import {
   adx, mfi, obv, keltner, keltnerPosition, aroon, superTrend, atr, sma, rsi,
 } from "../src/lib/ta";
 import {
-  ALL_SPECS, OPTIONAL_SPECS, actionFor, computeMegaIndicator, defaultWeightFor, defaultWeights,
-  effectiveWeight, evenWeights, percentShares,
+  ALL_SPECS, OPTIONAL_SPECS, actionFor, blendScoreHistory, computeMegaIndicator, defaultWeightFor,
+  defaultWeights, effectiveWeight, evenWeights, percentShares, scorePercentile,
   MEGA_BASELINE, explainBaseline, isMegaBaseline,
 } from "../src/lib/mega-indicator";
 import { suggestIndicators, median, MAX_SUGGESTIONS, type SuggestionContext } from "../src/lib/indicator-suggestions";
 import { isEvenWeights } from "../src/lib/mega-prefs";
 import { computeMegaScoreSeries } from "../src/lib/mega-score";
+
+// ─── The badge's "relative to its own history" readout ───
+//
+// The composite's distribution is not the same on every instrument, so the
+// percentile is the honest way to read a bare 0-100 score. It must also compare
+// one composite with itself: the charted history is cached on the shipped
+// weights, so the reference series is re-blended under the current map before
+// anything is measured against it.
+
+describe("scorePercentile / blendScoreHistory", () => {
+  it("reports the share of the history at or below the reading", () => {
+    const history = Array.from({ length: 100 }, (_, i) => i); // 0 … 99
+    expect(scorePercentile(history, 50)).toEqual({ percentile: 51, readings: 100 });
+    expect(scorePercentile(history, -1)?.percentile).toBe(0); // below every reading
+    expect(scorePercentile(history, 99)?.percentile).toBe(100); // above every reading
+    expect(scorePercentile(history, 1e6)?.percentile).toBe(100);
+  });
+
+  it("ignores gaps and refuses to answer from too few readings", () => {
+    const withGaps = [NaN, 10, 20, NaN, 30];
+    // 20 is at or below 2 of the 3 real readings.
+    expect(scorePercentile(withGaps, 20, 3)).toEqual({ percentile: 67, readings: 3 });
+    // The default floor is 20 readings, so a short or missing series says nothing.
+    expect(scorePercentile(withGaps, 20)).toBeNull();
+    expect(scorePercentile([], 50)).toBeNull();
+    expect(scorePercentile([1, 2, 3], NaN, 1)).toBeNull();
+  });
+
+  it("re-blends the history under the weights in force, using the live rule", () => {
+    const points = [
+      { indicators: { "ta-rsi-14": 100, "ta-bb-pos": 0 } },
+      { indicators: { "ta-rsi-14": 0, "ta-bb-pos": 100 } },
+    ];
+    // Shipped defaults weight RSI and Bollinger equally → both bars sit at 50.
+    expect(blendScoreHistory(points, null)).toEqual([50, 50]);
+    // Weighting RSI three times as heavily tilts the same bars apart.
+    const tilted = blendScoreHistory(points, { "ta-rsi-14": 60, "ta-bb-pos": 20 });
+    expect(tilted[0]).toBeCloseTo(75, 9);
+    expect(tilted[1]).toBeCloseTo(25, 9);
+    // Bars with nothing to score are skipped, never filled with a neutral 50.
+    expect(blendScoreHistory([{ indicators: { "ta-rsi-14": NaN } }], null)).toEqual([]);
+  });
+});
 
 // ─── Deterministic OHLCV with enough history for every warm-up ───
 function makeBars(n: number) {
@@ -337,12 +380,17 @@ describe("catalogue indicators match their published definitions", () => {
     }
   });
 
-  it("the default composite is balanced: 100 weight, RSI and Bollinger 20 each", () => {
+  it("the default composite is balanced: RSI and Bollinger 20 each, tracked as shares", () => {
     const weights = defaultWeights(ALL_SPECS);
     const total = ALL_SPECS.reduce((s, spec) => s + weights[spec.id], 0);
-    expect(total).toBeCloseTo(100, 10);
+    // The map's absolute total is not load-bearing (the composite divides by the
+    // weight it summed); only the shares are. It measured 93.5 after the Oct 2026
+    // calibration trimmed redundant trend/CCI/volatility weight.
+    expect(total).toBeCloseTo(93.5, 10);
     expect(weights["ta-rsi-14"]).toBe(20);
     expect(weights["ta-bb-pos"]).toBe(20);
+    expect(weights["ta-rsi-14"] / total).toBeCloseTo(0.214, 3);
+    expect(weights["ta-macd-hist"]).toBe(10);
     for (const spec of OPTIONAL_SPECS) expect(weights[spec.id]).toBe(0);
     for (const spec of ALL_SPECS.filter((s) => !s.optional)) {
       expect(weights[spec.id], `${spec.id} is switched off by default`).toBeGreaterThan(0);
@@ -433,8 +481,9 @@ describe("indicator suggestions", () => {
     expect(byId.get("ta-supertrend")!.reason).toContain("ADX 45");
     // Built-ins are already in the composite, so they come back as a reweight.
     expect(byId.get("ta-trend-50-200")?.kind).toBe("reweight");
-    // Balanced default is 4; a level-2 rule asks for 4 more points.
-    expect(byId.get("ta-trend-50-200")?.weight).toBe(8);
+    // Balanced default is 1 (cut from 4 by the Oct 2026 calibration); a
+    // level-2 rule asks for 4 more points on top of that.
+    expect(byId.get("ta-trend-50-200")?.weight).toBe(5);
     expect(out.length).toBeLessThanOrEqual(MAX_SUGGESTIONS);
   });
 
@@ -542,20 +591,23 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
   it("effectiveWeight: balanced built-in default, catalogue 0, an explicit weight always wins", () => {
     expect(effectiveWeight({ id: "ta-rsi-14" }, null)).toBe(20);
     expect(effectiveWeight({ id: "ta-bb-pos" }, null)).toBe(20);
-    expect(effectiveWeight({ id: "ta-trend-50-200" }, null)).toBe(4);
+    // The trend reading overlaps the SMA/EMA family and the oscillators, so the
+    // Oct 2026 calibration cut it from 4 to 1 (see mega-calibration-live).
+    expect(effectiveWeight({ id: "ta-trend-50-200" }, null)).toBe(1);
     expect(effectiveWeight({ id: "ta-adx-14", optional: true }, null)).toBe(0);
     expect(effectiveWeight({ id: "ta-adx-14", optional: true }, { "ta-adx-14": 3 })).toBe(3);
     expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": 0 })).toBe(0);
     expect(effectiveWeight({ id: "ta-rsi-14" }, { "ta-rsi-14": -2 })).toBe(0);
   });
 
-  it("the baseline action follows the score bands — buy ≥ 65, hold 35-65, sell < 35", () => {
+  it("the baseline action follows the score bands — buy ≥ entry, hold exit-to-entry, sell < exit", () => {
+    const { entry, exit } = MEGA_BASELINE;
     expect(actionFor(100).key).toBe("buy");
-    expect(actionFor(65).key).toBe("buy");
-    expect(actionFor(64.9).key).toBe("hold");
-    expect(actionFor(50).key).toBe("hold");
-    expect(actionFor(35).key).toBe("hold");
-    expect(actionFor(34.9).key).toBe("sell");
+    expect(actionFor(entry).key).toBe("buy");
+    expect(actionFor(entry - 0.1).key).toBe("hold");
+    expect(actionFor((entry + exit) / 2).key).toBe("hold");
+    expect(actionFor(exit).key).toBe("hold");
+    expect(actionFor(exit - 0.1).key).toBe("sell");
     expect(actionFor(0).key).toBe("sell");
     expect(actionFor(NaN).key).toBe("hold");
     // The payload carries the same action the UI derives from the score.
@@ -563,17 +615,24 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
     expect(res.action.key).toBe(actionFor(res.score).key);
   });
 
-  it("the baseline is the same 65 / 35 the Mega Indicator bands use", () => {
-    expect(MEGA_BASELINE).toEqual({ entry: 65, exit: 35 });
+  it("the baseline is the calibrated 70 / 25 band the Mega Indicator uses", () => {
+    // Pinned on purpose: the pair is a measured result (training-run optimum on
+    // 16 tickers × 15 years, reproduced by the Training tab), not an opinion.
+    expect(MEGA_BASELINE).toEqual({ entry: 70, exit: 25 });
+    // A reading on the exit is still a HOLD — the exit needs a strict break.
     expect(actionFor(MEGA_BASELINE.entry).key).toBe("buy");
     expect(actionFor(MEGA_BASELINE.exit).key).toBe("hold");
     expect(actionFor(MEGA_BASELINE.exit - 0.1).key).toBe("sell");
+    // The exit must sit well below the composite's median for this to be a
+    // drawdown filter rather than a whipsaw generator.
+    expect(MEGA_BASELINE.exit).toBeLessThan(35);
+    expect(MEGA_BASELINE.entry).toBeGreaterThan(65);
   });
 
   it("isMegaBaseline only recognizes the untouched bands", () => {
-    expect(isMegaBaseline(65, 35)).toBe(true);
-    expect(isMegaBaseline(64, 35)).toBe(false);
-    expect(isMegaBaseline(65, 36)).toBe(false);
+    expect(isMegaBaseline(MEGA_BASELINE.entry, MEGA_BASELINE.exit)).toBe(true);
+    expect(isMegaBaseline(MEGA_BASELINE.entry - 1, MEGA_BASELINE.exit)).toBe(false);
+    expect(isMegaBaseline(MEGA_BASELINE.entry, MEGA_BASELINE.exit + 1)).toBe(false);
   });
 
   it("explainBaseline says what the entry score and the exit score each do", () => {
@@ -626,5 +685,57 @@ describe("weight fallbacks — one rule for the server, the page and the backtes
     expect(isEvenWeights(evenWeights(ALL_SPECS))).toBe(false);
     // So is switching a built-in off.
     expect(isEvenWeights({ ...defaultWeights(ALL_SPECS), "ta-rsi-14": 0 })).toBe(false);
+  });
+});
+
+// ─── Per-indicator edits (right-click editor) ───────────────────
+// The payload the page renders must describe the EDITED indicator: its name,
+// unit, description, formula and scoring rule — otherwise the panel shows the
+// built-in's wording over the user's numbers.
+
+describe("computeMegaIndicator — per-indicator edits", () => {
+  it("reports the edited fields and scores with the edited rule", () => {
+    const res = computeMegaIndicator({
+      technical: { "ta-rsi-14": 55 },
+      overrides: {
+        "ta-rsi-14": {
+          name: "My RSI", unit: "pts", description: "My own momentum read",
+          direction: "higher", thresholds: [0, 100], formula: "rsi(close, 9)",
+        },
+      },
+    });
+    const ind = res.indicators.find((i) => i.id === "ta-rsi-14")!;
+    expect(ind.name).toBe("My RSI");
+    expect(ind.unit).toBe("pts");
+    expect(ind.description).toBe("My own momentum read");
+    expect(ind.formula).toBe("rsi(close, 9)");
+    expect(ind.direction).toBe("higher");
+    expect(ind.thresholds).toEqual([0, 100]);
+    // higher [0,100]: 55 sits 55% of the way up.
+    expect(ind.score).toBeCloseTo(55, 5);
+    // The VALUE is the caller's (the route evaluates the edited expression);
+    // only the spec fields come from the override here.
+    expect(ind.value).toBe(55);
+  });
+
+  it("leaves indicators the user did not edit exactly as they were", () => {
+    const plain = computeMegaIndicator({ technical: { "ta-rsi-14": 55, "ta-bb-pos": 90 } });
+    const edited = computeMegaIndicator({
+      technical: { "ta-rsi-14": 55, "ta-bb-pos": 90 },
+      overrides: { "ta-rsi-14": { name: "My RSI" } },
+    });
+    expect(edited.indicators.find((i) => i.id === "ta-bb-pos"))
+      .toEqual(plain.indicators.find((i) => i.id === "ta-bb-pos"));
+    expect(edited.indicators.find((i) => i.id === "ta-rsi-14")!.name).toBe("My RSI");
+  });
+
+  it("an empty or malformed override changes nothing", () => {
+    const plain = computeMegaIndicator({ technical: { "ta-rsi-14": 55 } });
+    const withJunk = computeMegaIndicator({
+      technical: { "ta-rsi-14": 55 },
+      overrides: { "ta-rsi-14": { thresholds: [90, 10] }, "unknown-id": { name: "Nope" } },
+    });
+    expect(withJunk.indicators).toEqual(plain.indicators);
+    expect(withJunk.score).toBe(plain.score);
   });
 });

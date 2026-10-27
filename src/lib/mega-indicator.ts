@@ -283,6 +283,77 @@ export function getSpec(id: string): IndicatorSpec | undefined {
   return ALL_SPECS.find((s) => s.id === id);
 }
 
+// ─── User overrides: edit an indicator's formula and its other fields ──
+//
+// Every indicator — built-in or user-defined — can be edited in place: any
+// field of its spec, and optionally its FORMULA, which replaces the built-in
+// calculation with the user's own expression (compiled by the same sandbox as
+// a custom indicator). An override is a PATCH: a field it omits keeps the
+// built-in's value, so clearing one field never wipes the others.
+
+/** Longest accepted override text fields (mirrors the custom-indicator limits). */
+export const MAX_OVERRIDE_NAME = 40;
+export const MAX_OVERRIDE_UNIT = 8;
+export const MAX_OVERRIDE_DESC = 160;
+
+/** A user edit to one indicator. Missing fields keep the built-in's value. */
+export interface IndicatorOverride {
+  direction?: Direction;
+  thresholds?: [number, number];
+  name?: string;
+  unit?: string;
+  description?: string;
+  /** A user expression that REPLACES this indicator's calculation, e.g. "rsi(close, 9)". */
+  formula?: string;
+}
+
+/** indicator id -> override. */
+export type IndicatorOverrideMap = Record<string, IndicatorOverride>;
+
+function isDirection(v: unknown): v is Direction {
+  return v === "higher" || v === "lower" || v === "band";
+}
+
+/**
+ * Patch a spec with one override. Invalid or empty parts keep the base value,
+ * so a half-typed or corrupted override can never produce an invalid spec
+ * (a reversed threshold pair would otherwise score above 100).
+ */
+export function applyIndicatorOverride(spec: IndicatorSpec, override?: IndicatorOverride): IndicatorSpec {
+  if (!override) return spec;
+  const text = (v: unknown, cap: number): string =>
+    typeof v === "string" ? v.trim().slice(0, cap) : "";
+  const name = text(override.name, MAX_OVERRIDE_NAME);
+  const unit = text(override.unit, MAX_OVERRIDE_UNIT);
+  const description = text(override.description, MAX_OVERRIDE_DESC);
+  const formula = text(override.formula, 400);
+  const t = override.thresholds;
+  const thresholds: [number, number] =
+    Array.isArray(t) && t.length === 2 && Number.isFinite(Number(t[0])) && Number.isFinite(Number(t[1])) && Number(t[0]) <= Number(t[1])
+      ? [Number(t[0]), Number(t[1])]
+      : spec.thresholds;
+  return {
+    ...spec,
+    direction: isDirection(override.direction) ? override.direction : spec.direction,
+    thresholds,
+    name: name || spec.name,
+    unit: unit || spec.unit,
+    description: description || spec.description,
+    // The formula field is what the UI shows as "how it's calculated" — once the
+    // user replaces the calculation, that text is the user's expression.
+    formula: formula || spec.formula,
+  };
+}
+
+/** Patch a whole spec list, leaving untouched indicators untouched. */
+export function specsWithOverrides(
+  specs: IndicatorSpec[],
+  overrides?: IndicatorOverrideMap | null,
+): IndicatorSpec[] {
+  if (!overrides || Object.keys(overrides).length === 0) return specs;
+  return specs.map((s) => (overrides[s.id] ? applyIndicatorOverride(s, overrides[s.id]) : s));
+}
+
 // ─── Normalization ─────────────────────────────────────────────
 
 /** Normalize a raw value to a 0-100 health score using the spec. */
@@ -319,10 +390,54 @@ export function normalizeScore(value: number, spec: IndicatorSpec): number {
   return Math.max(0, 60 - pct * 60);
 }
 
-/** The composite score at which the baseline says buy. */
-export const MEGA_BUY_ABOVE = 65;
-/** Below this the baseline says sell; between the two thresholds it says hold. */
-export const MEGA_SELL_BELOW = 35;
+/**
+ * The composite score at which the baseline says buy.
+ *
+ * 70 (was 65) — calibrated Oct 2026 against the composite's own distribution:
+ * on 16 tickers × 15 years the score sits at p10 ≈ 50, median ≈ 65, p90 ≈ 75,
+ * so a 65 entry is the median and a 35 exit is below the 10th percentile —
+ * "always long, never sell". The trained pair 70 / 25 is the best of the tested
+ * grid on the training window in every split and keeps the highest out-of-sample
+ * win rate (94-97%) with ~1.2 trades per symbol per 4 years.
+ *
+ * Re-checked Oct 2026 on the 24-ticker universe (volatile block included), 3
+ * universes × 3 splits, held-out tail — the whole entry 55-85 × exit 20-50 grid:
+ * NOTHING STRICTER PAYS. Every cell above 70/25 lowers excess Sharpe, because
+ * each early exit has to be re-entered later and the re-entries give back more
+ * than the drawdown they avoid: 75/35 −0.15 (drawdown cut 2.4 pt), 80/40 −0.48
+ * (9.8 pt), 85/50 −0.67 (32 pt). 70/25 is the top of that trade-off curve at
+ * −0.02, i.e. a drawdown filter that costs about nothing. The band search in
+ * the Training tab does pick 75-77.5 / 27.5 on the training window, and the
+ * held-out result is indistinguishable from 70/25 (−0.06 to +0.04) — so the
+ * entry may rise a little without cost, but it does not gain anything either.
+ * On the volatile block alone the band search is actively dangerous: it chose
+ * exits of 45-50 and lost 0.16-0.28 excess Sharpe out of sample against 0.02-0.09
+ * for 70/25. Do not adopt a band pair that the held-out column does not support.
+ */
+export const MEGA_BUY_ABOVE = 70;
+/**
+ * Below this the baseline says sell; between the two thresholds it says hold.
+ *
+ * 25 (was 35). This is the number that was producing the bad trades: at 35 the
+ * regime rule exits on ordinary pullbacks (score p25 ≈ 55 is not reached, but a
+ * 35 exit fires on ~8-11 whipsaws per symbol), and those re-entries won only
+ * 50% of the time and cost 0.11-0.17 Sharpe against buy & hold. At 25 the rule
+ * only leaves the market in a genuine breakdown.
+ *
+ * WHAT THE EXIT ACTUALLY DOES (measured Oct 2026, 24 tickers × 15 years, cached
+ * daily bars, 2 bps each way): on the full window 70/25 closed exactly ONE trade
+ * on 22 of the 24 tickers — a single entry in late 2011 held to the end of the
+ * test. AMD (exited 2014-10-16) and NFLX (2022-01-27) are the only names that
+ * ever sold and re-entered. The reason is the score's own floor: smoothed on
+ * 5 days it bottomed at 23-34 on those tickers (median 63-67) and spent 0-8
+ * sessions under 30 in fifteen years. So a 25 exit is not "a slow filter", it is
+ * a filter that mostly never fires — this rule is buy & hold with a tail
+ * guardrail, and it earns that description. Loosening it is what changes
+ * behaviour, and the fast variant (`mega_score_fast` in lib/strategies.ts) shows
+ * what that costs: ~40× the trades, a third off the drawdown, 0.20-0.36 Sharpe
+ * behind buy & hold against +0.01 / +0.08 here.
+ */
+export const MEGA_SELL_BELOW = 25;
 
 /**
  * The Mega Score baseline in one object: the entry/exit bands the app
@@ -334,9 +449,9 @@ export const MEGA_BASELINE = { entry: MEGA_BUY_ABOVE, exit: MEGA_SELL_BELOW } as
 
 export type MegaBandKey = "entry" | "exit";
 
-/** True when the bands are the untouched baseline (65 / 35). */
+/** True when the bands are the untouched baseline (MEGA_BASELINE). */
 export function isMegaBaseline(entry: number, exit: number): boolean {
-  return Math.round(entry) === MEGA_BASELINE.entry && Math.round(exit) === MEGA_BASELINE.exit;
+  return Math.round(entry) === Math.round(MEGA_BASELINE.entry) && Math.round(exit) === Math.round(MEGA_BASELINE.exit);
 }
 
 export interface BaselineExplanation {
@@ -375,9 +490,9 @@ export function explainBaseline(entry: number, exit: number): BaselineExplanatio
           : "";
 
   return {
-    summary: `Buy when the composite is ${e} or above · Sell when it is ${x} or below`,
+    summary: `Buy when the composite is ${e} or above · Sell when it is below ${x}`,
     entry: `Entry score (${e}): the composite Mega Score a trade needs to reach before a long position is opened. Once the score is at or above ${e}, the backtest buys on the next day's open. Lower = buys earlier and more often; higher = waits for a stronger technical reading.`,
-    exit: `Exit score (${x}): the level the score has to fall to before an open position is closed — also at the next day's open. Higher = leaves sooner; lower = rides out more weakness.`,
+    exit: `Exit score (${x}): the level the score has to fall strictly below before an open position is closed — also at the next day's open. A reading of exactly ${x} keeps the position open (the Mega Indicator baseline treats that as HOLD). Higher = leaves sooner; lower = rides out more weakness.`,
     hold:
       bandWidth < 0
         ? "There is no no-trade band here: with the entry score below the exit score the rule contradicts itself, so nothing sits between buying and selling."
@@ -404,8 +519,8 @@ export interface MegaAction {
 /**
  * The Mega Score baseline: what the composite says to do, not just how healthy
  * it looks. The bands are deliberately wide — the composite is a blend, and a
- * blend sitting near neutral is not a trade signal. ≥ 65 buy, 35-65 hold,
- * < 35 sell; the bands are exported so the UI and any strategy agree on them.
+ * blend sitting near neutral is not a trade signal. ≥ 70 buy, 25-70 hold,
+ * < 25 sell; the bands are exported so the UI and any strategy agree on them.
  */
 export function actionFor(score: number): MegaAction {
   if (!Number.isFinite(score)) {
@@ -472,45 +587,77 @@ export interface MegaInput {
   weights?: WeightMap;
   /** ids of indicators the user toggled off (excluded from the composite) */
   excluded?: string[];
+  /** Per-indicator field/formula edits, applied to the specs before scoring. */
+  overrides?: IndicatorOverrideMap;
 }
 
 /**
- * Default ("balanced") weights — a research-weighted starting composite, not a
- * flat one. A flat average lets sixteen near-duplicate SMA/EMA readings outvote
- * the indicators that actually carry independent information; this map gives
- * the composite 100 weight in total and reflects what each signal is worth:
+ * Default ("balanced") weights — a research-weighted composite, not a flat one.
+ * A flat average lets sixteen near-duplicate SMA/EMA readings outvote the
+ * indicators that actually carry independent information; this map reflects what
+ * each signal is worth:
  *
  *   • RSI(14) and the Bollinger position carry 20 each — the two mean-reversion
  *     / momentum readings with the most independent signal.
  *   • MACD histogram 10: the other genuinely orthogonal momentum measure.
- *   • Trend, ATR, momentum, volume, 52-week distance, efficiency ratio and the
- *     kernel pair share 42 points — the context a single oscillator lacks.
+ *   • Momentum, stochastic, ATR, volume, 52-week distance, efficiency ratio and
+ *     the kernel pair share the rest — the context a single oscillator lacks.
  *   • The SMA/EMA family shares 8 points (0.5 each): sixteen correlated
  *     price-vs-average readings should not dominate the blend.
  *
  * The catalogue still starts at 0: an indicator joins the composite only when
  * the user (or a suggestion they accepted) adds it.
+ *
+ * Calibrated Oct 2026 (`tests/mega-calibration-live.test.ts`, 16 tickers × 15y,
+ * 2 bps commission + 2 bps slippage, chronological 60/40 · 70/30 · 80/20 splits):
+ * the trio above is load-bearing — at identical 70/25 bands a flat average scores
+ * −0.23, an RSI-only blend −0.29, and this blend −0.02 to +0.06 excess Sharpe vs
+ * buy & hold. The calibration moved redundancy out of the blend: trend 4 → 1,
+ * CCI 3 → 1, ATR 4 → 3, 3-day volatility 1 → 0.5, which improved excess Sharpe
+ * on all three splits (+0.04, +0.05, +0.09). Re-verify with the Training tab —
+ * do not edit these numbers from memory. Only the SHARES matter: the map totals
+ * 93.5, and the composite divides by the weight it actually summed.
+ *
+ * Re-derived Oct 2026 on the 24-ticker universe (the 16 above plus TSLA, AMD,
+ * NFLX, MU, FSLR, GME, MSTR, SMCI — 47-99% annualized vol each), same costs and
+ * splits, bands frozen at 70/25. Two results, both measured before this map was
+ * left alone:
+ *
+ *   • THIS MAP SURVIVES. Training on the large-cap-only half now *loses* out of
+ *     sample (−0.09 to −0.12 excess Sharpe across the three splits, against
+ *     −0.02 to +0.02 for this map): slow uptrends mostly reward staying long, so
+ *     the search there trims the trend/momentum legs and pays for it. Trained on
+ *     the volatile block or on all 24 the result is −0.01 mean, i.e. inside the
+ *     noise band of this map rather than a different map.
+ *   • NO MOVE IS STABLE ENOUGH TO ADOPT. 12 retrains (2 universes × 3 splits ×
+ *     catalogue off/on) moved 19 search axes; every axis except volume-vs-20-day
+ *     flipped in both directions across runs, and volume-vs-20-day only drifts
+ *     2 → 0.5-1 on half of them. With ~1.4 trades per symbol on the held-out
+ *     tail the objective cannot tell two weight maps apart by much more than
+ *     noise, so a "trained" map here would be a copy of this one plus luck.
+ *     That is why the numbers below did not move: re-running the tab on a few
+ *     dozen tickers is not evidence for a new map.
  */
 export const DEFAULT_WEIGHTS: Readonly<Record<string, number>> = {
   "ta-rsi-14": 20,
   "ta-bb-pos": 20,
   "ta-macd-hist": 10,
-  "ta-trend-50-200": 4,
-  "ta-atr-pct": 4,
+  "ta-trend-50-200": 1,
+  "ta-atr-pct": 3,
   "ta-stoch-k": 4,
   "ta-mom-63": 4,
   "ta-stoch-d": 2,
   "ta-williams-r": 3,
   "ta-stochrsi-k": 3,
   "ta-stochrsi-d": 1,
-  "ta-cci-20": 3,
-  "ta-vol-3d": 1,
+  "ta-cci-20": 1,
+  "ta-vol-3d": 0.5,
   "ta-vol-ratio": 2,
   "ta-dist-52w-high": 3,
   "ta-er-10": 3,
   "ta-kernel-slope": 3,
   "ta-kernel-residual": 2,
-  // The SMA/EMA family (16 specs) shares the remaining 8 points.
+  // The SMA/EMA family (16 specs) shares 8 points.
   ...Object.fromEntries(
     MA_PERIODS.flatMap((p) => [[`ta-sma-${p}`, 0.5], [`ta-ema-${p}`, 0.5]])
   ),
@@ -556,9 +703,11 @@ export function effectiveWeight(
   return Math.max(0, raw ?? defaultWeightFor(spec.id, spec.optional));
 }
 
-/** Every spec that takes part in this computation: built-ins + any custom. */
-function specsFor(input: Pick<MegaInput, "custom">): IndicatorSpec[] {
-  return input.custom?.length ? [...ALL_SPECS, ...input.custom] : ALL_SPECS;
+/** Every spec that takes part in this computation: built-ins + any custom, with
+ *  the user's per-indicator edits applied on top. */
+function specsFor(input: Pick<MegaInput, "custom" | "overrides">): IndicatorSpec[] {
+  const base = input.custom?.length ? [...ALL_SPECS, ...input.custom] : ALL_SPECS;
+  return specsWithOverrides(base, input.overrides);
 }
 
 export function computeMegaIndicator(input: MegaInput): MegaResult {
@@ -680,4 +829,66 @@ export function scoreLabel(score: number): string {
   if (score >= 50) return "Mixed";
   if (score >= 35) return "Weak";
   return "Critical";
+}
+
+/**
+ * Re-blend a score history under one weight map: the same weighted mean the live
+ * composite uses (`Σ score × weight ÷ Σ weight`), run over a series that already
+ * holds each indicator's own 0-100 score per bar.
+ *
+ * Why this exists. The charted history is deliberately computed and cached on the
+ * shipped weights, so moving a slider changes the *view* and never redraws the
+ * past — but that also means the series is not the composite on screen once a
+ * user has custom weights. Anything that compares a current reading with its
+ * history (the percentile badge) has to compare like with like, so it re-blends
+ * the history's per-indicator scores through the same `effectiveWeight` rule the
+ * live score uses. Bars where no indicator has a reading yet are skipped rather
+ * than scored as 50.
+ */
+export function blendScoreHistory(
+  points: Array<{ indicators: Record<string, number> }>,
+  weights?: WeightMap | null
+): number[] {
+  const out: number[] = [];
+  for (const p of points) {
+    let sum = 0;
+    let total = 0;
+    for (const [id, score] of Object.entries(p.indicators ?? {})) {
+      if (!Number.isFinite(score)) continue;
+      const w = effectiveWeight({ id, optional: OPTIONAL_IDS.has(id) }, weights);
+      if (w <= 0) continue;
+      sum += score * w;
+      total += w;
+    }
+    if (total > 0) out.push(sum / total);
+  }
+  return out;
+}
+
+/**
+ * Where one reading sits inside a history of the same score, as a percentile
+ * (0-100): the share of that history at or below the reading. `minReadings`
+ * guards against answering from a handful of bars — below it the result is null
+ * and callers show nothing rather than a number built on noise.
+ *
+ * This is a *relative* statement about a ticker's own past, which is the point:
+ * the composite's distribution is not the same across instruments (its low decile
+ * sits several points lower on high-volatility names), so the same 0-100 reading
+ * means different things on different tickers.
+ */
+export function scorePercentile(
+  history: number[],
+  score: number,
+  minReadings = 20
+): { percentile: number; readings: number } | null {
+  if (!Number.isFinite(score)) return null;
+  let readings = 0;
+  let atOrBelow = 0;
+  for (const v of history) {
+    if (!Number.isFinite(v)) continue;
+    readings++;
+    if (v <= score) atOrBelow++;
+  }
+  if (readings < minReadings) return null;
+  return { percentile: Math.round((atOrBelow / readings) * 100), readings };
 }

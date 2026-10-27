@@ -8,12 +8,33 @@
 // Browser-only: every export guards `window` so importing this from server
 // code never crashes (it just reports "nothing saved").
 
-import { OPTIONAL_IDS, defaultWeightFor, type WeightMap } from "./mega-indicator";
+import { OPTIONAL_IDS, defaultWeightFor, type IndicatorOverrideMap, type WeightMap } from "./mega-indicator";
+import { loadOverrides } from "./mega-overrides";
 
 // Keys must match LS_* constants in dashboard/mega-indicator/page.tsx.
 const LS_WEIGHTS = "mega-indicator:weights:v1";
 const LS_PRESET = "mega-indicator:preset:v1";
 const LS_TICKER = "mega-indicator:ticker:v1";
+
+/** The storage keys, exported so a writer (e.g. the training lab) cannot drift
+ *  from the reader here or from the Mega Indicator page. */
+export const MEGA_STORAGE_KEYS = { weights: LS_WEIGHTS, preset: LS_PRESET, ticker: LS_TICKER } as const;
+
+/**
+ * Persist a weight map for the Mega Indicator page and the backtest's Mega Score
+ * strategy. Training writes here so "apply" means the whole app agrees, not just
+ * the panel that applied it.
+ */
+export function saveMegaWeights(weights: WeightMap, preset: MegaPresetKey = "custom"): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.setItem(LS_WEIGHTS, JSON.stringify(weights));
+    window.localStorage.setItem(LS_PRESET, JSON.stringify(preset));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export type MegaPresetKey = "balanced" | "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
 
@@ -106,4 +127,16 @@ export function megaWeightsLabel(prefs: MegaPrefs): string {
 export function activeMegaWeights(useCustom: boolean, prefs: MegaPrefs): WeightMap | null {
   if (!useCustom || !prefs.weights || isEvenWeights(prefs.weights)) return null;
   return prefs.weights;
+}
+
+/**
+ * The saved per-indicator edits to send to the API (right-click editor on the
+ * Mega Indicator page): null → omit. Everything that scores the composite — the
+ * score history, the backtest's Mega Score strategy, the chart overlay, the
+ * optimizer and the trade-log breakdown — reads them from here, so all of them
+ * score the indicators the user actually defined.
+ */
+export function activeMegaOverrides(): IndicatorOverrideMap | null {
+  const ov = loadOverrides();
+  return Object.keys(ov).length > 0 ? ov : null;
 }

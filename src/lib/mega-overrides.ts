@@ -9,15 +9,18 @@
 // Keeping it pure (no React) means the exact same code path is exercised by the
 // tests as by the app.
 
-import { normalizeScore, type Direction, type IndicatorSpec } from "./mega-indicator";
+import { normalizeScore, type Direction, type IndicatorSpec, type IndicatorOverride, type IndicatorOverrideMap, applyIndicatorOverride, MAX_OVERRIDE_NAME, MAX_OVERRIDE_UNIT, MAX_OVERRIDE_DESC } from "./mega-indicator";
+import { parseFormula } from "./custom-indicators";
 
 export const LS_MEGA_OVERRIDES = "mega-indicator:overrides:v1";
 
-/** A user edit to one indicator's scoring formula. Missing fields = keep base. */
-export interface ScoreOverride {
-  direction?: Direction;
-  thresholds?: [number, number];
-}
+/**
+ * A user edit to one indicator: its scoring formula (direction + thresholds),
+ * and — with the formula/field editor — its other fields. `formula` replaces
+ * the built-in CALCULATION with the user's own expression, compiled by the same
+ * sandbox as a custom indicator. Missing fields keep the built-in's value.
+ */
+export type ScoreOverride = IndicatorOverride;
 
 /** indicator id -> formula override. */
 export type ScoreOverrideMap = Record<string, ScoreOverride>;
@@ -70,6 +73,42 @@ export function isFormulaChanged(base: ScoringFormula, override?: ScoreOverride)
   );
 }
 
+/**
+ * True when an override changes ANYTHING — the scoring rule or any other field
+ * (name, unit, description, or the calculation itself). This is what the
+ * editor's "Reset" button keys off, so a formula-only edit is resettable too.
+ */
+export function isOverrideChanged(spec: IndicatorSpec, override?: ScoreOverride): boolean {
+  if (!override) return false;
+  const patched = applyIndicatorOverride(spec, override);
+  return (
+    isFormulaChanged(spec, override) ||
+    patched.name !== spec.name ||
+    patched.unit !== spec.unit ||
+    patched.description !== spec.description ||
+    patched.formula !== spec.formula
+  );
+}
+
+/**
+ * Stable hash of an override map, for cache keys: a changed edit must not be
+ * served a cached series computed under the old one.
+ */
+export function hashOverrides(overrides?: IndicatorOverrideMap | null): string {
+  if (!overrides) return "0";
+  const keys = Object.keys(overrides).filter((k) => overrides[k]).sort();
+  if (keys.length === 0) return "0";
+  const str = keys
+    .map((k) => {
+      const o = overrides[k];
+      return `${k}|${o.direction ?? ""}|${o.thresholds?.join(",") ?? ""}|${o.name ?? ""}|${o.unit ?? ""}|${o.description ?? ""}|${o.formula ?? ""}`;
+    })
+    .join(";");
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 /** Drop invalid / empty entries so corrupted storage can never break the page. */
 export function sanitizeOverrides(raw: unknown): ScoreOverrideMap {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -86,6 +125,22 @@ export function sanitizeOverrides(raw: unknown): ScoreOverrideMap {
       // scores above 100. Equal is fine: it's a step function (e.g. [0, 0]).
       if (lo <= hi) override.thresholds = [lo, hi];
     }
+    // Text fields, capped like the custom-indicator editor's.
+    const text = (x: unknown, cap: number): string | undefined => {
+      if (typeof x !== "string") return undefined;
+      const t = x.trim().slice(0, cap);
+      return t || undefined;
+    };
+    const name = text(rec.name, MAX_OVERRIDE_NAME);
+    const unit = text(rec.unit, MAX_OVERRIDE_UNIT);
+    const description = text(rec.description, MAX_OVERRIDE_DESC);
+    if (name) override.name = name;
+    if (unit) override.unit = unit;
+    if (description) override.description = description;
+    // A replacement expression is only kept if it compiles — the same parser the
+    // server evaluates with, so what is stored is always what can run.
+    const formula = text(rec.formula, 400);
+    if (formula && parseFormula(formula).ok) override.formula = formula;
     if (Object.keys(override).length > 0) out[id] = override;
   }
   return out;

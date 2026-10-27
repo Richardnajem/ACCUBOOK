@@ -13,8 +13,9 @@
 import { getDailyBars } from "./market-data";
 import { getDb } from "./db";
 import { CAUSAL_SPECS, computeMegaScoreSeries } from "./mega-score";
-import type { WeightMap } from "./mega-indicator";
+import type { IndicatorOverrideMap, WeightMap } from "./mega-indicator";
 import { type CustomIndicatorDef } from "./custom-indicators";
+import { hashOverrides } from "./mega-overrides";
 
 export interface HistoryPoint {
   date: string;
@@ -70,11 +71,14 @@ export async function getMegaHistory(
   weights?: WeightMap,
   years = 3,
   custom?: CustomIndicatorDef[],
+  overrides?: IndicatorOverrideMap,
 ): Promise<MegaHistoryResult> {
   const sym = symbol.trim().toUpperCase();
   // Sub-year windows (1M ≈ 0.08y, 6M = 0.5y) must be part of the cache key,
   // otherwise the 1M chart would be served the cached 3Y series trimmed client-side.
-  const wHash = `${hashWeights(weights)}:${years}:${hashCustom(custom)}`;
+  // Per-indicator edits belong in the key too: an edited formula changes every
+  // point, so serving the pre-edit series would be wrong, not just stale.
+  const wHash = `${hashWeights(weights)}:${years}:${hashCustom(custom)}:${hashOverrides(overrides)}`;
   const warnings: string[] = [];
   // Names for the legend: built-ins + any custom indicators that compute.
   const nameMap = (): Record<string, string> => {
@@ -130,7 +134,7 @@ export async function getMegaHistory(
     warnings.push(`Only ${bars.length} bars available — 200-day indicators need more history, early scores will be partial (neutral 50).`);
   }
 
-  const { score, indicators, customSpecs, customErrors } = computeMegaScoreSeries(
+  const { score, indicators, customSpecs, specs, customErrors } = computeMegaScoreSeries(
     {
       high: bars.map((b) => b.high),
       low: bars.map((b) => b.low),
@@ -139,10 +143,13 @@ export async function getMegaHistory(
       open: bars.map((b) => b.open),
     },
     weights,
-    custom
+    custom,
+    overrides
   );
   warnings.push(...customErrors);
-  const scoredSpecs = [...CAUSAL_SPECS, ...customSpecs];
+  // The series' own specs (overrides applied) — not a fresh copy of the
+  // catalogue — so an edited name/unit follows through to the legend.
+  const scoredSpecs = specs?.length ? specs : [...CAUSAL_SPECS, ...customSpecs];
 
   const points: HistoryPoint[] = bars.map((bar, i) => {
     const indScores: Record<string, number> = {};
@@ -160,7 +167,7 @@ export async function getMegaHistory(
   });
 
   const indicatorNames: Record<string, string> = nameMap();
-  for (const s of customSpecs) indicatorNames[s.id] = s.name;
+  for (const s of scoredSpecs) indicatorNames[s.id] = s.name;
 
   const result: MegaHistoryResult = {
     symbol: sym,

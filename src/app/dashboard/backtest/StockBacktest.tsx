@@ -7,14 +7,17 @@ import {
 } from "recharts";
 import { SortableTable, Column } from "@/components/SortableTable";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
+import { BAR_INTERVALS, cadenceLabel, type BarInterval, type BarUnit } from "@/lib/bar-resample";
 import DetailDrawer, { toneOf } from "@/components/DetailDrawer";
 import { downloadCSV } from "@/lib/export";
-import { loadMegaPrefs, megaWeightsLabel, activeMegaWeights, type MegaPrefs } from "@/lib/mega-prefs";
-import { MEGA_BASELINE, explainBaseline, isMegaBaseline } from "@/lib/mega-indicator";
+import { loadMegaPrefs, megaWeightsLabel, activeMegaWeights, activeMegaOverrides, saveMegaWeights, type MegaPrefs } from "@/lib/mega-prefs";
+import { MEGA_BASELINE, explainBaseline, isMegaBaseline, type WeightMap } from "@/lib/mega-indicator";
 import type { BacktestOutput } from "@/lib/backtest-engine";
+import type { IndicatorReading, MegaScoreSnapshot } from "@/lib/mega-score";
 import StrategyCompare from "./StrategyCompare";
 import ParamOptimizer from "./ParamOptimizer";
 import WalkForward from "./WalkForward";
+import TrainingLab from "./TrainingLab";
 
 const fmt = (n: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
 const fmt2 = (n: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(n);
@@ -30,12 +33,39 @@ const YEAR_OPTIONS = [1 / 12, 0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30];
 // Sub-year windows render as months (1M / 6M), otherwise as years (2Y, 5Y…)
 const yearLabel = (y: number) => (y < 1 ? (Math.round(y * 12) === 1 ? "1M" : "6M") : `${y}Y`);
 
-type Mode = "single" | "compare" | "optimize" | "walk";
+/**
+ * Identity of the trade whose per-indicator breakdown is on screen. Used as the
+ * key of the snapshot state so a stale response for a previously opened trade
+ * can never be rendered, without an effect having to clear state on close.
+ */
+const tradeKeyOf = (t: { id: number; entryDate: string; exitDate: string | null }) =>
+  `${t.id}|${t.entryDate}|${t.exitDate ?? "open"}`;
+
+/** How long one bar is — the run's history line says so instead of assuming days. */
+const barCadence = (r: { bars: number; summary: { barMinutes: number; barUnit: BarUnit } }) =>
+  cadenceLabel({ barMinutes: r.summary.barMinutes, periodsPerYear: 0, barUnit: r.summary.barUnit }, r.bars);
+
+/** Average hold, in the units the run actually traded in. */
+const holdLabel = (s: { avgBarsHeld: number; barUnit: BarUnit; barMinutes: number }) => {
+  const unit = s.barUnit === "day" ? "days" : s.barUnit === "week" ? "weeks" : s.barUnit === "month" ? "months" : "bars";
+  const detail = s.barUnit === "minute" ? ` (≈${(s.avgBarsHeld * s.barMinutes).toFixed(0)} min)` : "";
+  return `${s.avgBarsHeld.toFixed(s.barUnit === "minute" ? 0 : 1)} ${unit}${detail} held`;
+};
+
+/** One line per frequency, shown under the chooser and on hover. */
+const BAR_INTERVAL_HINTS: Record<BarInterval, string> = {
+  daily: "the default: one decision per session, Sharpe annualized on 252 periods",
+  weekly: "the daily series resampled to weekly bars — fewer, longer holds, 52 periods a year",
+  monthly: "monthly bars — the slowest, cheapest way to trade the same signal, 12 periods a year",
+};
+
+type Mode = "single" | "compare" | "optimize" | "walk" | "train";
 const MODES: { key: Mode; label: string }[] = [
   { key: "single", label: "🔍 Single Backtest" },
   { key: "compare", label: "⚔ Compare All" },
   { key: "optimize", label: "🧭 Optimize Params" },
   { key: "walk", label: "🚶 Walk Forward" },
+  { key: "train", label: "🎓 Train Weights" },
 ];
 
 // Keep recharts responsive on long histories (~2500 bars)
@@ -54,6 +84,8 @@ export default function StockBacktest() {
   const [ticker, setTicker] = useState("AAPL");
   const [strategyId, setStrategyId] = useState("sma_cross");
   const [years, setYears] = useState(10);
+  /** How often the rule is allowed to act. The daily series is resampled first. */
+  const [barInterval, setBarInterval] = useState<BarInterval>("daily");
   const [capital, setCapital] = useState(100000);
   const [commissionBps, setCommissionBps] = useState(2);
   const [slippageBps, setSlippageBps] = useState(2);
@@ -72,6 +104,48 @@ export default function StockBacktest() {
   // Trade opened from the Trade Log — its drawer shows the exact dates and the
   // Mega Score on the entry/exit day.
   const [tradeDetail, setTradeDetail] = useState<BacktestOutput["trades"][number] | null>(null);
+  // Per-indicator breakdown of the bars a trade was decided on. Fetched on
+  // demand (the run itself only carries the composite), so opening the trade
+  // log row shows every indicator without bloating every backtest response.
+  // Keyed by trade, so closing the drawer or opening another trade invalidates
+  // the loaded data without any state reset.
+  const [snapshotResult, setSnapshotResult] = useState<{
+    key: string;
+    snapshots: Partial<Record<"entry" | "exit", MegaScoreSnapshot>>;
+    error: string | null;
+  } | null>(null);
+  /** Which bar the user is looking at, remembered per trade. */
+  const [sideChoice, setSideChoice] = useState<{ key: string; side: "entry" | "exit" } | null>(null);
+  // Right-clicked Trade Log row: the menu jumps straight to the indicators on
+  // either bar of that trade, instead of opening the drawer on the entry side
+  // and switching tabs by hand.
+  const [logMenu, setLogMenu] = useState<{
+    trade: BacktestOutput["trades"][number]; x: number; y: number;
+  } | null>(null);
+
+  /** Open the trade drawer focused on one bar's full indicator breakdown. */
+  const inspectTradeBar = (trade: BacktestOutput["trades"][number], side: "entry" | "exit") => {
+    setTradeDetail(trade);
+    setSideChoice({ key: tradeKeyOf(trade), side });
+    setLogMenu(null);
+  };
+
+  const snapshotKey = tradeDetail ? tradeKeyOf(tradeDetail) : null;
+  /** The signal dates to fetch for the open trade (pure — derived, not stored). */
+  const snapshotWanted = useMemo<Partial<Record<"entry" | "exit", string>>>(() => {
+    if (!tradeDetail) return {};
+    const wanted: Partial<Record<"entry" | "exit", string>> = {
+      entry: tradeDetail.entrySignalDate ?? tradeDetail.entryDate,
+    };
+    const exitDate = tradeDetail.exitSignalDate ?? tradeDetail.exitDate;
+    if (exitDate) wanted.exit = exitDate;
+    return wanted;
+  }, [tradeDetail]);
+  const snapshotSide = sideChoice && sideChoice.key === snapshotKey ? sideChoice.side : "entry";
+  const snapshotsAreCurrent = snapshotKey !== null && snapshotResult?.key === snapshotKey;
+  const snapshotLoading = snapshotKey !== null && !snapshotsAreCurrent;
+  const snapshotError = snapshotsAreCurrent ? snapshotResult?.error ?? null : null;
+  const [showZeroWeight, setShowZeroWeight] = useState(false);
   const [mode, setMode] = useState<Mode>("single");
 
   useEffect(() => {
@@ -98,6 +172,56 @@ export default function StockBacktest() {
     return () => window.removeEventListener("focus", sync);
   }, []);
 
+  // Trade opened from the log → pull the per-indicator breakdown of the bars it
+  // was decided on (same weights the run traded). Recomputed server-side on
+  // demand so a normal response never ships ~150 series.
+  //
+  // Which dates belong to the open trade, which side the tab is on, and whether
+  // the load is still pending are all DERIVED below — the effect only fetches and
+  // writes the response in its callbacks. Clearing/resetting state up front would
+  // cascade renders on every drawer open (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    if (!tradeDetail || !result) return;
+    const dates = Object.values(snapshotWanted).filter(Boolean) as string[];
+    if (dates.length === 0) return;
+    const key = tradeKeyOf(tradeDetail);
+    let alive = true;
+    fetch("/api/backtest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "indicatorSnapshot",
+        symbol: result.symbol,
+        years: result.config.years,
+        dates,
+        megaWeights: result.config.megaWeights,
+        megaOverrides: result.config.megaOverrides,
+      }),
+    })
+      .then((r) => r.json())
+      .then((data: { error?: string; snapshots?: MegaScoreSnapshot[] }) => {
+        if (!alive) return;
+        if (data.error) throw new Error(data.error);
+        const byDate = new Map((data.snapshots ?? []).map((s) => [s.date, s]));
+        const next: Partial<Record<"entry" | "exit", MegaScoreSnapshot>> = {};
+        for (const side of ["entry", "exit"] as const) {
+          const d = snapshotWanted[side];
+          const snap = d ? byDate.get(d) : undefined;
+          if (snap) next[side] = snap;
+        }
+        setSnapshotResult({ key, snapshots: next, error: null });
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setSnapshotResult({
+          key,
+          snapshots: {},
+          error: err instanceof Error ? err.message : "Could not load the indicator breakdown",
+        });
+      });
+    return () => { alive = false; };
+  }, [tradeDetail, result, snapshotWanted]);
+
   const selected = catalog.find(s => s.id === strategyId);
   // Mega Score's buy/sell thresholds have their own "base score" panel below,
   // so keep them out of the generic strategy-parameters row.
@@ -123,7 +247,7 @@ export default function StockBacktest() {
     setParams(prev => ({ ...prev, [key]: v }));
   };
 
-  const run = useCallback(async (overrides?: { strategyId?: string; params?: Record<string, number> }) => {
+  const run = useCallback(async (overrides?: { strategyId?: string; params?: Record<string, number>; megaWeights?: WeightMap }) => {
     setRunning(true);
     setError(null);
     try {
@@ -144,7 +268,12 @@ export default function StockBacktest() {
           maxTrades,
           minTrades,
           benchmarkSymbol,
-          megaWeights: activeMegaWeights(useMegaPrefs, megaPrefs) ?? undefined,
+          barInterval,
+          megaWeights: overrides?.megaWeights ?? activeMegaWeights(useMegaPrefs, megaPrefs) ?? undefined,
+          // Read at run time, like the weights, so an edit made on the Mega
+          // Indicator page applies to the next run — the backtest then scores
+          // the same indicators the UI shows.
+          megaOverrides: activeMegaOverrides() ?? undefined,
           params: overrides?.params ?? params,
         }),
       });
@@ -156,7 +285,28 @@ export default function StockBacktest() {
     } finally {
       setRunning(false);
     }
-  }, [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, maxTrades, minTrades, benchmarkSymbol, useMegaPrefs, megaPrefs]);
+  }, [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, maxTrades, minTrades, benchmarkSymbol, useMegaPrefs, megaPrefs, barInterval]);
+
+  /**
+   * Adoption path for the Training tab: the trained weights become the app's
+   * saved Mega weights (so the Mega Indicator page agrees), the trained bands
+   * become the Mega Score strategy's bands, and the run starts immediately with
+   * unsmoothed score = the exact series the training measured.
+   */
+  const handleApplyTrainedWeights = useCallback(
+    (weights: WeightMap, entryBand: number, exitBand: number) => {
+      saveMegaWeights(weights, "custom");
+      setMegaPrefs({ weights, preset: "custom", ticker: megaPrefs.ticker, hasCustomWeights: true });
+      setUseMegaPrefs(true);
+      setMode("single");
+      changeStrategy("mega_score");
+      const p = { entry: entryBand, exit: exitBand, smooth: 1 };
+      setParams(p);
+      run({ strategyId: "mega_score", params: p, megaWeights: weights });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [run, megaPrefs.ticker]
+  );
 
   const handleApplyFromOptimizer = useCallback((sid: string, p: Record<string, number>) => {
     setMode("single");
@@ -208,6 +358,25 @@ export default function StockBacktest() {
     () => (result ? result.monthlyReturns.map(m => ({ month: m.month, ret: Math.round(m.ret * 10) / 10 })) : []),
     [result]
   );
+
+  // The breakdown shown in the trade drawer: the bar that was asked for, every
+  // indicator that carried weight (or all of them, on request), biggest
+  // contributor first.
+  const activeSnapshot = snapshotsAreCurrent ? snapshotResult?.snapshots[snapshotSide] ?? null : null;
+  const indicatorRows = useMemo(() => {
+    if (!activeSnapshot) return [];
+    const rank = (v: number | null) => (v == null ? Number.NEGATIVE_INFINITY : v);
+    return activeSnapshot.readings
+      .filter((r) => showZeroWeight || r.weight > 0)
+      .sort((a, b) => rank(b.contribution) - rank(a.contribution));
+  }, [activeSnapshot, showZeroWeight]);
+  const fmtUnit = (unit: string) => (unit === "%" ? "%" : unit === "x" ? "×" : unit ? ` ${unit}` : "");
+  const readingText = (r: IndicatorReading) => {
+    if (r.raw == null) return "—";
+    const abs = Math.abs(r.raw);
+    const digits = abs >= 100 ? 0 : abs >= 10 ? 1 : 2;
+    return `${r.raw.toFixed(digits)}${fmtUnit(r.unit)}`;
+  };
 
   // Mega Score at a trade date, coloured by the run's own buy/sell bands.
   const scoreTone = (v: number | null | undefined): "pos" | "neg" | "muted" | undefined => {
@@ -279,12 +448,16 @@ export default function StockBacktest() {
       render: r => {
         const style = r.reason === "stop-loss"
           ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+          : r.reason === "trailing-stop"
+          ? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
           : r.reason === "take-profit"
           ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+          : r.reason === "session-close"
+          ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300"
           : r.reason === "end-of-test"
           ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
           : "bg-[var(--card-hover)] text-[var(--muted)]";
-        const label = r.reason === "stop-loss" ? "STOP" : r.reason === "take-profit" ? "TARGET" : r.reason === "end-of-test" ? "EOT" : "SIGNAL";
+        const label = r.reason === "stop-loss" ? "STOP" : r.reason === "trailing-stop" ? "TRAIL" : r.reason === "session-close" ? "EOD" : r.reason === "take-profit" ? "TARGET" : r.reason === "end-of-test" ? "EOT" : "SIGNAL";
         return <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${style}`}>{label}</span>;
       },
     },
@@ -321,6 +494,7 @@ export default function StockBacktest() {
       {mode === "compare" && <StrategyCompare />}
       {mode === "optimize" && <ParamOptimizer onApply={handleApplyFromOptimizer} />}
       {mode === "walk" && <WalkForward onApply={handleApplyFromOptimizer} />}
+      {mode === "train" && <TrainingLab onApply={handleApplyTrainedWeights} />}
 
       {/* ── Control panel ─────────────────────────────────── */}
       <div className={`glass rounded-xl p-5 ${mode !== "single" ? "hidden" : ""}`}>
@@ -357,6 +531,24 @@ export default function StockBacktest() {
                   <button key={y} onClick={() => setYears(y)}
                     className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${years === y ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
                     {yearLabel(y)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--muted)] mb-1 mt-3">
+                Trading frequency{" "}
+                <span className="text-[10px]">
+                  — how often the rule may act; {""}
+                  {BAR_INTERVAL_HINTS[barInterval]}
+                </span>
+              </label>
+              <div className="flex flex-wrap gap-1">
+                {BAR_INTERVALS.map(iv => (
+                  <button key={iv} onClick={() => setBarInterval(iv)}
+                    title={BAR_INTERVAL_HINTS[iv]}
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${barInterval === iv ? "bg-indigo-600 text-white" : "bg-[var(--card-hover)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}>
+                    {iv.toUpperCase()}
                   </button>
                 ))}
               </div>
@@ -473,7 +665,7 @@ export default function StockBacktest() {
               </div>
               <div>
                 <label htmlFor="mega-exit-score" className="block text-xs font-medium mb-1">
-                  Exit score <span className="text-[var(--muted)] font-normal">— sell at or below</span>
+                  Exit score <span className="text-[var(--muted)] font-normal">— sell strictly below</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -494,7 +686,7 @@ export default function StockBacktest() {
                 <div
                   style={{ width: `${Math.max(0, Math.min(100, exitScore))}%` }}
                   className="flex items-center justify-center whitespace-nowrap bg-rose-500/25 text-rose-700 dark:text-rose-300">
-                  {exitScore > 12 ? `SELL ≤ ${exitScore}` : ""}
+                  {exitScore > 12 ? `SELL < ${exitScore}` : ""}
                 </div>
                 <div
                   style={{ width: `${Math.max(0, entryScore - exitScore)}%` }}
@@ -581,7 +773,7 @@ export default function StockBacktest() {
           </button>
           {result && !running && (
             <span className="text-xs text-[var(--muted)]">
-              {result.symbol} · {result.meta.name} · {result.bars} trading days ({result.dateFrom} → {result.dateTo})
+              {result.symbol} · {result.meta.name} · {barCadence(result)} ({result.dateFrom} → {result.dateTo})
               · data: {result.dataSource === "cache" ? "cached" : "Yahoo Finance"}
             </span>
           )}
@@ -624,17 +816,35 @@ export default function StockBacktest() {
             {card("Sharpe Ratio", s.sharpe.toFixed(2), s.sharpe >= 1 ? "good" : s.sharpe >= 0.5 ? "neutral" : "bad")}
             {card("Sortino Ratio", s.sortino.toFixed(2), s.sortino >= 1 ? "good" : "neutral")}
             {card("Max Drawdown", pct(-s.maxDrawdownPct), "bad", `B&H: ${pct(-s.benchmarkMaxDrawdownPct)}`)}
+            {card("Closed Trades", String(s.totalTrades), "neutral", `${s.tradesPerYear.toFixed(1)} / year · ${holdLabel(s)}`)}
             {card("Win Rate", pct(s.winRate), "neutral", `${s.totalTrades} closed trades${maxTrades > 0 ? ` · max ${maxTrades}` : ""}${minTrades > 0 ? ` · min ${minTrades}` : ""}`)}
             {card("Profit Factor", s.profitFactor >= 99 ? "∞" : s.profitFactor.toFixed(2), s.profitFactor >= 1.5 ? "good" : s.profitFactor >= 1 ? "neutral" : "bad")}
             {card("Avg Trade", pct(s.avgTradeReturnPct, 2), s.avgTradeReturnPct >= 0 ? "good" : "bad", `best ${pct(s.bestTradePct, 1)} / worst ${pct(s.worstTradePct, 1)}`)}
             {card("Avg Hold", `${s.avgBarsHeld.toFixed(0)} days`, "neutral")}
             {card("Calmar Ratio", s.calmar.toFixed(2), s.calmar >= 1 ? "good" : s.calmar >= 0.5 ? "neutral" : "bad", "CAGR / Max DD")}
             {card("Time in Market", pct(s.timeInMarketPct), "neutral", "rest earns 0% cash")}
-            {card("Trades / Year", (s.totalTrades / Math.max(result.equityCurve.length / 252, 0.1)).toFixed(1), "neutral")}
+
             {card("Expectancy", pct(s.expectancyPct, 2), s.expectancyPct >= 0 ? "good" : "bad", "avg return per trade")}
             {card("Payoff Ratio", s.payoffRatio >= 99 ? "∞" : s.payoffRatio.toFixed(2), s.payoffRatio >= 1.5 ? "good" : s.payoffRatio >= 1 ? "neutral" : "bad", "avg win / avg loss")}
             {card("Max Loss Streak", String(s.maxConsecutiveLosses), s.maxConsecutiveLosses <= 3 ? "neutral" : "bad", `${s.maxConsecutiveWins} best win streak`)}
             {card("Recovery Factor", s.recoveryFactor >= 99 ? "∞" : s.recoveryFactor.toFixed(2), s.recoveryFactor >= 2 ? "good" : s.recoveryFactor >= 1 ? "neutral" : "bad", "return / max DD")}
+          </div>
+
+          {/* Risk profile — one comparable factor, and the measured pieces behind it */}
+          <div className="rounded-xl border border-[var(--card-border)] p-3 space-y-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-xs font-semibold">Risk profile</p>
+              <p className="text-[10px] text-[var(--muted)]">
+                Risk factor = 40 % volatility vs buy &amp; hold + 35 % Ulcer index + 25 % max drawdown (0–100, lower = calmer)
+              </p>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+              {card("Risk Factor", `${s.risk.riskFactor.toFixed(0)}/100`, s.risk.riskFactor < 45 ? "good" : s.risk.riskFactor < 65 ? "neutral" : "bad", s.risk.riskLevel)}
+              {card("Volatility", pct(s.risk.annualVolPct, 1), "neutral", `B&H: ${pct(s.risk.benchmarkVolPct, 1)}`)}
+              {card("Beta", s.risk.beta.toFixed(2), "neutral", "vs benchmark")}
+              {card("Downside Dev", pct(s.risk.downsideDevPct, 1), "neutral", "loss days only")}
+              {card("Ulcer Index", s.risk.ulcerIndex.toFixed(1), "neutral", "RMS drawdown depth")}
+            </div>
           </div>
 
           <PanelBoard
@@ -680,7 +890,7 @@ export default function StockBacktest() {
                 {megaBands && (
                   <span className="flex items-center gap-1">
                     <span className="w-3 h-0.5 bg-emerald-500 inline-block" /> Buy ≥ {megaBands.entry}
-                    <span className="w-3 h-0.5 bg-red-500 inline-block ml-1" /> Sell ≤ {megaBands.exit}
+                    <span className="w-3 h-0.5 bg-red-500 inline-block ml-1" /> Sell {"<"} {megaBands.exit}
                   </span>
                 )}
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Trade marker</span>
@@ -716,7 +926,7 @@ export default function StockBacktest() {
               <p className="text-[10px] text-[var(--muted)] mt-2">
                 {result.megaScoreDescription}
                 {result.config.megaWeights && result.strategyId === "mega_score" && useMegaPrefs ? " · matching your Mega Indicator weights" : ""}
-                {megaBands ? ` · traded at buy ≥ ${megaBands.entry}, sell ≤ ${megaBands.exit}` : ""}
+                {megaBands ? ` · traded at buy ≥ ${megaBands.entry}, sell < ${megaBands.exit}` : ""}
               </p>
             )}
           </ChartPanel>
@@ -764,8 +974,7 @@ export default function StockBacktest() {
           {/* Trades */}
           <ChartPanel
             id="trades"
-            title={`Trade Log (${result.trades.length} trades)`}
-            subtitle="Click a trade for its exact entry/exit days and the Mega Score on each"
+            title={`Trade Log (${result.trades.length} trades)`}              subtitle="Click a trade for its exact entry/exit days and the Mega Score on each · right-click to jump to every indicator on either bar"
             className="xl:col-span-2"
             right={
               <button onClick={() => {
@@ -789,10 +998,55 @@ export default function StockBacktest() {
               emptyMessage="No trades were generated"
               rowKey={(r) => r.id}
               onRowClick={(r) => setTradeDetail(r)}
+              onRowContextMenu={(r, e) => setLogMenu({ trade: r, x: e.clientX, y: e.clientY })}
             />
           </ChartPanel>
           </PanelBoard>
         </>
+      )}
+
+      {/* ── Right-click a Trade Log row: that trade's indicators at either bar ── */}
+      {logMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setLogMenu(null)}
+          onContextMenu={(e) => { e.preventDefault(); setLogMenu(null); }}
+        >
+          <div
+            className="absolute w-72 rounded-xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-2 text-xs"
+            style={{
+              left: Math.max(8, Math.min(logMenu.x, (typeof window !== "undefined" ? window.innerWidth : 900) - 300)),
+              top: Math.max(8, Math.min(logMenu.y, (typeof window !== "undefined" ? window.innerHeight : 700) - 220)),
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="px-2 py-1 font-semibold text-[11px] truncate">
+              Trade #{logMenu.trade.id} · every indicator at…
+            </p>
+            <button
+              onClick={() => inspectTradeBar(logMenu.trade, "entry")}
+              className="w-full text-left px-2 py-1.5 rounded hover:bg-[var(--card-hover)] flex items-center justify-between gap-2"
+            >
+              <span>Entry bar</span>
+              <span className="font-mono text-[10px] text-[var(--muted)]">
+                {logMenu.trade.entrySignalDate ?? logMenu.trade.entryDate}
+              </span>
+            </button>
+            <button
+              onClick={() => inspectTradeBar(logMenu.trade, "exit")}
+              disabled={!logMenu.trade.exitDate}
+              className="w-full text-left px-2 py-1.5 rounded hover:bg-[var(--card-hover)] flex items-center justify-between gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <span>Exit bar{logMenu.trade.reason ? ` (${logMenu.trade.reason})` : ""}</span>
+              <span className="font-mono text-[10px] text-[var(--muted)]">
+                {logMenu.trade.exitSignalDate ?? logMenu.trade.exitDate ?? "still open"}
+              </span>
+            </button>
+            <p className="px-2 py-1.5 text-[10px] leading-relaxed text-[var(--muted)]">
+              Each indicator&apos;s raw reading, 0-100 score and the points it added to the composite on that bar.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* ── Trade detail: exact days + Mega Score at entry/exit ── */}
@@ -877,6 +1131,8 @@ export default function StockBacktest() {
                         {
                           label: "Exit reason",
                           value: tradeDetail.reason === "stop-loss" ? "Stop-loss"
+                            : tradeDetail.reason === "trailing-stop" ? "ATR trailing stop"
+                            : tradeDetail.reason === "session-close" ? "Session close (flat by the bell)"
                             : tradeDetail.reason === "take-profit" ? "Take-profit target"
                             : tradeDetail.reason === "end-of-test" ? "Closed at end of test"
                             : "Strategy signal",
@@ -903,7 +1159,7 @@ export default function StockBacktest() {
                       heading: "Score bands this run traded",
                       rows: [
                         { label: "Buy when score ≥", value: megaBands.entry.toFixed(0) },
-                        { label: "Sell when score ≤", value: megaBands.exit.toFixed(0) },
+                        { label: "Sell when score is below", value: megaBands.exit.toFixed(0) },
                       ],
                     }]
                   : []),
@@ -912,13 +1168,124 @@ export default function StockBacktest() {
         }
       >
         {tradeDetail && (
-          <p className="text-xs text-[var(--muted)] leading-relaxed">
-            The signal score is the Mega Score reading that generated the trade ({signalWindow} of the same
-            look-ahead-safe series plotted under the price chart) — that is the number the buy/sell bands are
-            compared against. Signals fill at the next session&apos;s open, and the fill day&apos;s own close is
-            shown beside it because the score can move overnight.
-            {tradeDetail.entryScore == null && " This run did not compute the score series (bulk compare/optimize runs skip it)."}
-          </p>
+          <div className="space-y-4">
+            <p className="text-xs text-[var(--muted)] leading-relaxed">
+              The signal score is the Mega Score reading that generated the trade ({signalWindow} of the same
+              look-ahead-safe series plotted under the price chart) — that is the number the buy/sell bands are
+              compared against. Signals fill at the next session&apos;s open, and the fill day&apos;s own close is
+              shown beside it because the score can move overnight.
+              {tradeDetail.entryScore == null && " This run did not compute the score series (bulk compare/optimize runs skip it)."}
+            </p>
+
+            {/* Every indicator behind the composite on the entry / exit bar. */}
+            <div className="border-t border-[var(--card-border)] pt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold">Every indicator at this trade</p>
+                <div className="flex rounded-lg overflow-hidden border border-[var(--card-border)]">
+                  {(["entry", "exit"] as const).map((side) => {
+                    const available = snapshotsAreCurrent && (side === "entry" ? !!snapshotWanted.entry : !!snapshotWanted.exit);
+                    const active = snapshotSide === side;
+                    return (
+                      <button
+                        key={side}
+                        onClick={() => snapshotKey && setSideChoice({ key: snapshotKey, side })}
+                        disabled={!available}
+                        className={`px-2.5 py-1 text-[10px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                          active
+                            ? "bg-indigo-600 text-white"
+                            : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)]"
+                        }`}>
+                        {side === "entry" ? "Entry bar" : "Exit bar"}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {snapshotsAreCurrent && snapshotLoading && (
+                <p className="text-[11px] text-[var(--muted)] mt-2">Recomputing the indicator series…</p>
+              )}
+              {snapshotsAreCurrent && snapshotError && !snapshotLoading && (
+                <p className="text-[11px] text-[var(--danger)] mt-2">⚠ {snapshotError}</p>
+              )}
+
+              {snapshotsAreCurrent && !snapshotLoading && !snapshotError && activeSnapshot && (
+                <>
+                  <p className="text-[11px] text-[var(--muted)] mt-2 leading-relaxed">
+                    {activeSnapshot.date} close · composite{" "}
+                    <span className="font-mono font-semibold text-[var(--foreground)]">
+                      {activeSnapshot.composite == null ? "—" : activeSnapshot.composite.toFixed(1)}
+                    </span>{" "}
+                    · {activeSnapshot.readings.filter((r) => r.weight > 0 && r.score != null).length} of{" "}
+                    {activeSnapshot.readings.length} indicators in the composite
+                    {activeSnapshot.missing > 0 && ` · ${activeSnapshot.missing} still warming up`}
+                  </p>
+
+                  <label className="flex items-center gap-2 text-[10px] text-[var(--muted)] mt-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showZeroWeight}
+                      onChange={(e) => setShowZeroWeight(e.target.checked)}
+                      className="accent-indigo-500" />
+                    include indicators your weights exclude (0)
+                  </label>
+
+                  <div className="mt-2 max-h-80 overflow-y-auto rounded-lg border border-[var(--card-border)]">
+                    <table className="w-full text-[11px] border-collapse">
+                      <thead className="sticky top-0 bg-[var(--card)] z-10">
+                        <tr className="text-[10px] text-[var(--muted)] text-left">
+                          <th className="py-1.5 px-2 font-medium">Indicator</th>
+                          <th className="py-1.5 px-2 font-medium text-right whitespace-nowrap">Reading</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Score</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Wt</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Pts</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {indicatorRows.map((r) => (
+                          <tr key={r.id} title={r.description} className="border-t border-[var(--card-border)]/60">
+                            <td className="py-1 px-2">
+                              <span className="font-medium">{r.name}</span>
+                              <span className="block text-[9px] text-[var(--muted)]">{r.category}</span>
+                            </td>
+                            <td className="py-1 px-2 text-right font-mono whitespace-nowrap text-[var(--muted)]">
+                              {readingText(r)}
+                            </td>
+                            <td
+                              className={`py-1 px-2 text-right font-mono ${
+                                r.score == null
+                                  ? "text-[var(--muted)]"
+                                  : r.score >= MEGA_BASELINE.entry
+                                    ? "text-[var(--success)]"
+                                    : r.score <= MEGA_BASELINE.exit
+                                      ? "text-[var(--danger)]"
+                                      : ""
+                              }`}>
+                              {r.score == null ? "—" : r.score.toFixed(1)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-mono text-[var(--muted)]">{r.weight}</td>
+                            <td className="py-1 px-2 text-right font-mono whitespace-nowrap">
+                              {r.contribution == null
+                                ? "—"
+                                : `${r.contribution > 0 ? "+" : ""}${r.contribution.toFixed(1)}`}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="text-[10px] text-[var(--muted)] mt-1.5 leading-relaxed">
+                    <b>Reading</b> is the indicator&apos;s own value on that bar, <b>Score</b> is that value re-wrapped as
+                    0–100 health, <b>Wt</b> is the weight your composite gives it, and <b>Pts</b> is how many points of
+                    the 0–100 composite it added — they sum to the composite above. Sorted by contribution.
+                    {result?.strategyId === "mega_score" && tradeDetail.entryScore != null &&
+                      " The band check above used the smoothed signal reading, so it can differ slightly from this bar's raw composite."}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
         )}
       </DetailDrawer>
     </div>

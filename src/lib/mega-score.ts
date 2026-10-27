@@ -12,7 +12,7 @@
 // their centered variant reads future bars. The score at date D therefore uses
 // exclusively data up to D, so it is safe to trade on bar-by-bar.
 
-import { ALL_SPECS, MA_PERIODS, effectiveWeight, normalizeScore, type IndicatorSpec, type WeightMap } from "./mega-indicator";
+import { ALL_SPECS, MA_PERIODS, effectiveWeight, normalizeScore, specsWithOverrides, type IndicatorSpec, type IndicatorOverrideMap, type WeightMap } from "./mega-indicator";
 import {
   sma, ema, rsi, macd, bollinger, atr, rollingMax, stochastic, cci, stdev, williamsR, stochRsi,
   adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
@@ -20,7 +20,7 @@ import {
   balanceOfPower, cmo, percentSlope,
   connorsRsi, coppock, pmo, dpo, emv, atrStop, rollingMin,
 } from "./ta";
-import { evaluateCustomSeries, type CustomIndicatorDef } from "./custom-indicators";
+import { evaluateCustomSeries, evalFormula, type CustomIndicatorDef } from "./custom-indicators";
 
 /** Minimal OHLCV shape needed (Bar satisfies it; strategies pass zipped arrays). */
 export interface MegaScoreInput {
@@ -42,10 +42,50 @@ export interface MegaScoreSeries {
   score: number[];
   /** Per-indicator 0-100 score series keyed by spec id (NaN during warm-up). */
   indicators: Record<string, number[]>;
+  /** Per-indicator RAW values keyed by spec id (RSI points, % distance, ratios …), NaN during warm-up. */
+  raw: Record<string, number[]>;
   /** Specs of the custom definitions that evaluated successfully. */
   customSpecs: IndicatorSpec[];
+  /**
+   * Every spec that was scored, with the user's per-indicator overrides already
+   * applied — names, units and scoring rules included. `snapshotMegaScore`
+   * reads these so a log row describes the indicators the run actually used.
+   */
+  specs: IndicatorSpec[];
   /** Readable failures from custom definitions (empty when none were passed). */
   customErrors: string[];
+}
+
+/** One indicator's contribution to the composite on a single bar. */
+export interface IndicatorReading {
+  id: string;
+  name: string;
+  category: string;
+  unit: string;
+  /** What the indicator measures, in one line (shown as the row's tooltip). */
+  description: string;
+  /** Weight used in the composite (0 = not in it). */
+  weight: number;
+  /** The indicator's own value on the bar, in its natural units. */
+  raw: number | null;
+  /** Normalized 0-100 health score on the bar. */
+  score: number | null;
+  /** Points of the 0-100 composite this indicator added (null when it had no reading). */
+  contribution: number | null;
+}
+
+/** Everything the composite was made of on one bar — what the trade log shows. */
+export interface MegaScoreSnapshot {
+  date: string;
+  index: number;
+  /** The composite printed for this bar (0-100, unrounded by the caller). */
+  composite: number | null;
+  /** Sum of the weights that actually contributed on this bar. */
+  totalWeight: number;
+  /** Every causal indicator (plus any custom ones), whether it contributed or not. */
+  readings: IndicatorReading[];
+  /** How many indicators had no reading yet (warm-up) on this bar. */
+  missing: number;
 }
 
 /**
@@ -55,7 +95,8 @@ export interface MegaScoreSeries {
 export function computeMegaScoreSeries(
   input: MegaScoreInput,
   weights?: WeightMap,
-  custom?: CustomIndicatorDef[]
+  custom?: CustomIndicatorDef[],
+  overrides?: IndicatorOverrideMap,
 ): MegaScoreSeries {
   const { high, low, close, volume } = input;
   const n = close.length;
@@ -265,12 +306,44 @@ export function computeMegaScoreSeries(
     }
   }
 
+  // ─── User-edited calculations ─────────────────────────────────
+  // An override whose `formula` is set REPLACES that indicator's built-in
+  // series, evaluated over the same bars by the same sandbox as a custom
+  // indicator. A failed or non-compiling expression keeps the built-in series
+  // and says so, rather than silently scoring something else.
+  if (overrides) {
+    for (const [id, ov] of Object.entries(overrides)) {
+      const formula = ov?.formula?.trim();
+      if (!formula) continue;
+      if (!ALL_SPECS.some((s) => s.id === id)) continue;
+      try {
+        const edited = evalFormula(formula, {
+          open: open ?? new Array(n).fill(NaN),
+          high, low, close, volume,
+        });
+        if (!edited.some((v) => Number.isFinite(v))) {
+          customErrors.push(`Your formula for ${id} produced no value — the built-in calculation is still being used.`);
+          continue;
+        }
+        raw[id] = edited.map((v) => (Number.isFinite(v) ? v : NaN));
+        // A formula edit wins over a custom definition of the same id.
+        delete customRaw[id];
+      } catch (e) {
+        customErrors.push(
+          `Your formula for ${id} could not be evaluated (${e instanceof Error ? e.message : "invalid"}) — the built-in calculation is still being used.`
+        );
+      }
+    }
+  }
+
   // ─── Normalize + blend into the composite ─────────────────────
-  const specsToScore: IndicatorSpec[] = [...CAUSAL_SPECS, ...customSpecs];
+  const specsToScore: IndicatorSpec[] = specsWithOverrides([...CAUSAL_SPECS, ...customSpecs], overrides);
   const indicators: Record<string, number[]> = {};
+  const rawValues: Record<string, number[]> = {};
   for (const spec of specsToScore) {
     const vals = spec.id in customRaw ? customRaw[spec.id] : raw[spec.id];
     if (!vals) continue;
+    rawValues[spec.id] = vals;
     const scores = new Array(n).fill(NaN);
     for (let i = 0; i < n; i++) {
       if (Number.isFinite(vals[i])) scores[i] = normalizeScore(vals[i], spec);
@@ -293,5 +366,69 @@ export function computeMegaScoreSeries(
     score[i] = wSum > 0 ? Math.round((wVal / wSum) * 10) / 10 : 50;
   }
 
-  return { score, indicators, customSpecs, customErrors };
+  return { score, indicators, raw: rawValues, customSpecs, specs: specsToScore, customErrors };
+}
+
+/**
+ * Decompose the composite on one bar: every indicator's raw reading, its
+ * normalized 0-100 score, the weight it carried and the points it added. This
+ * is what lets the trade log answer "why did the score cross the buy band?"
+ * with the indicators themselves instead of just the total.
+ */
+export function snapshotMegaScore(
+  series: MegaScoreSeries,
+  barIndex: number,
+  date: string,
+  weights?: WeightMap
+): MegaScoreSnapshot {
+  // The series carries the specs it scored with (overrides applied), so the
+  // snapshot describes the same indicators the run used.
+  const specs: IndicatorSpec[] = series.specs?.length
+    ? series.specs
+    : [...CAUSAL_SPECS, ...series.customSpecs];
+  const round2 = (v: number) => Math.round(v * 100) / 100;
+
+  const scored = specs.map((spec) => {
+    const s = series.indicators[spec.id]?.[barIndex];
+    const r = series.raw[spec.id]?.[barIndex];
+    return {
+      spec,
+      weight: effectiveWeight(spec, weights),
+      score: s !== undefined && Number.isFinite(s) ? s : null,
+      raw: r !== undefined && Number.isFinite(r) ? r : null,
+    };
+  });
+
+  // Only indicators that have both a reading and a weight enter the average —
+  // the same rule the composite itself uses, so contributions add up to it.
+  const totalWeight = scored.reduce(
+    (sum, x) => (x.score !== null && x.weight > 0 ? sum + x.weight : sum),
+    0
+  );
+
+  const readings: IndicatorReading[] = scored.map((x) => ({
+    id: x.spec.id,
+    name: x.spec.name,
+    category: x.spec.category,
+    unit: x.spec.unit,
+    description: x.spec.description,
+    weight: x.weight,
+    raw: x.raw,
+    score: x.score === null ? null : Math.round(x.score * 10) / 10,
+    contribution:
+      x.score === null
+        ? null
+        : x.weight > 0 && totalWeight > 0
+          ? round2((x.score * x.weight) / totalWeight)
+          : 0,
+  }));
+
+  return {
+    date,
+    index: barIndex,
+    composite: Number.isFinite(series.score[barIndex]) ? series.score[barIndex] : null,
+    totalWeight: round2(totalWeight),
+    readings,
+    missing: readings.filter((r) => r.score === null).length,
+  };
 }

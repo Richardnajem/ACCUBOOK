@@ -7,17 +7,21 @@ import {
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
 import {
-  actionFor, defaultWeightFor, effectiveWeight, percentShares, scoreColor, scoreLabel, WeightMap,
+  actionFor, blendScoreHistory, defaultWeightFor, effectiveWeight, getSpec, percentShares, scoreColor,
+  scoreLabel, scorePercentile, MEGA_BUY_ABOVE, MEGA_SELL_BELOW, WeightMap,
+  MAX_OVERRIDE_NAME, MAX_OVERRIDE_UNIT, MAX_OVERRIDE_DESC, type IndicatorSpec,
 } from "@/lib/mega-indicator";
 import {
   scoreWithOverride,
   mergeFormula,
   isFormulaChanged,
+  isOverrideChanged,
   loadOverrides,
   saveOverrides,
   setOverride as setFormulaOverride,
   clearOverride as clearFormulaOverride,
   formulaLabel,
+  type ScoreOverride,
   type ScoreOverrideMap,
 } from "@/lib/mega-overrides";
 import {
@@ -30,11 +34,13 @@ import {
   newCustomId,
   parseFormula,
   saveCustom,
+  specForCustom,
   type CustomIndicatorDef,
 } from "@/lib/custom-indicators";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 import IndicatorPicker from "@/components/IndicatorPicker";
 import DetailDrawer from "@/components/DetailDrawer";
+import MegaIndicatorHelp from "@/components/MegaIndicatorHelp";
 import type { Suggestion } from "@/lib/indicator-suggestions";
 
 interface MegaIndicator {
@@ -197,12 +203,22 @@ const categoryIcons: Record<string, string> = {
 type Preset = "balanced" | "all" | "trend" | "momentum" | "reversal" | "smooth" | "custom";
 
 const PRESETS: Array<{ key: Preset; label: string; hint: string }> = [
-  { key: "balanced", label: "⚖️ Balanced", hint: "Research-weighted default: RSI and Bollinger 20% each, everything else sized by signal (weights total 100)" },
+  { key: "balanced", label: "⚖️ Balanced", hint: "Calibrated default: RSI and Bollinger 20 weight each (≈21% of the composite), MACD 10, everything else sized by signal" },
   { key: "all", label: "⚖️ Everything", hint: "All indicators equally weighted" },
   { key: "trend", label: "🧭 Trend", hint: "Trend, MAs and kernel slope emphasized" },
   { key: "momentum", label: "🚀 Momentum", hint: "RSI, MACD and 3-month momentum emphasized" },
   { key: "reversal", label: "🔄 Mean Reversion", hint: "Bollinger position, RSI / StochRSI bands, Williams %R and 52w distance emphasized" },
   { key: "smooth", label: "🌊 Smooth Trends", hint: "Clean trends rewarded — efficiency ratio and kernel residual emphasized" },
+];
+
+/** History horizons the chart offers — also labels the percentile's reference window. */
+const HISTORY_WINDOWS: Array<{ y: number; label: string }> = [
+  { y: 1 / 12, label: "1M (30d)" },
+  { y: 0.5, label: "6M" },
+  { y: 1, label: "1Y" },
+  { y: 3, label: "3Y" },
+  { y: 5, label: "5Y" },
+  { y: 10, label: "10Y" },
 ];
 
 // Concrete weight maps per preset (indicator ids match lib/mega-indicator specs)
@@ -266,6 +282,31 @@ export default function MegaIndicatorPage() {
   // Lazy-initialised (loadOverrides guards SSR) so no setState-in-effect is needed.
   const [overrides, setOverrides] = useState<ScoreOverrideMap>(() => loadOverrides());
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Text fields of the open right-click editor, held locally and committed on
+  // blur: a half-typed formula must never reach storage or the API, while the
+  // weight/threshold inputs stay live for instant feedback.
+  const [fieldDraft, setFieldDraft] = useState<{
+    id: string; name: string; unit: string; description: string; formula: string;
+  } | null>(null);
+
+  // The part of the override map the SERVER needs: a replacement formula changes
+  // the raw value, and the text fields change what the API reports. Direction and
+  // thresholds are applied locally for instant feedback, so they stay out of the
+  // request — and out of the fetch effects' dependencies, which would otherwise
+  // refetch on every keystroke of a threshold. The serialized string is the
+  // dependency, so a threshold edit that leaves the payload unchanged is free.
+  const overridePayload = useMemo(() => {
+    const server: ScoreOverrideMap = {};
+    for (const [id, ov] of Object.entries(overrides)) {
+      const o: ScoreOverride = {};
+      if (ov.formula) o.formula = ov.formula;
+      if (ov.name) o.name = ov.name;
+      if (ov.unit) o.unit = ov.unit;
+      if (ov.description) o.description = ov.description;
+      if (Object.keys(o).length > 0) server[id] = o;
+    }
+    return Object.keys(server).length === 0 ? "" : JSON.stringify(server);
+  }, [overrides]);
 
   // ─── User-defined indicators ("Add Indicator" editor) ─────────
   // Definitions live in localStorage and are sent to the API, which compiles
@@ -277,6 +318,8 @@ export default function MegaIndicatorPage() {
   const [preview, setPreview] = useState<{ key: string; value: number; score: number } | null>(null);
   const [previewErr, setPreviewErr] = useState<{ key: string; message: string } | null>(null);
   const [showHelp, setShowHelp] = useState(false);
+  // "How this works": weights, presets and both formula editors, explained in-app.
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // ─── Score-over-time history ───────────────────────────────────
   const [history, setHistory] = useState<MegaHistoryResponse | null>(null);
@@ -310,6 +353,7 @@ export default function MegaIndicatorPage() {
         const params = new URLSearchParams();
         if (ticker) params.set("ticker", ticker);
         if (custom.length) params.set("custom", JSON.stringify(custom));
+        if (overridePayload) params.set("overrides", overridePayload);
         const res = await fetch(`/api/mega-indicator?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
@@ -336,7 +380,7 @@ export default function MegaIndicatorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [ticker, custom]);
+  }, [ticker, custom, overridePayload]);
 
   // Persist weights / preset / ticker on every change.
   useEffect(() => {
@@ -350,15 +394,64 @@ export default function MegaIndicatorPage() {
 
   // Persist per-indicator formula overrides on every change.
   useEffect(() => { saveOverrides(overrides); }, [overrides]);
+
+  // ─── Right-click editor: open / close / commit ────────────────
+  const openMenu = (
+    e: { preventDefault: () => void; clientX: number; clientY: number },
+    ind: MegaIndicator,
+  ) => {
+    e.preventDefault();
+    const ov = overrides[ind.id] || {};
+    setFieldDraft({
+      id: ind.id,
+      name: ov.name ?? "",
+      unit: ov.unit ?? "",
+      description: ov.description ?? "",
+      formula: ov.formula ?? "",
+    });
+    setMenu({ id: ind.id, x: e.clientX, y: e.clientY });
+  };
+
+  const closeMenu = () => { setMenu(null); setFieldDraft(null); };
+
+  /**
+   * Commit one text field of the open indicator's override. Blank clears the
+   * field back to the built-in, and a formula is only stored once it compiles —
+   * checked with the same parser the server evaluates it with.
+   */
+  const commitOverrideField = (
+    key: "name" | "unit" | "description" | "formula",
+    raw: string,
+  ) => {
+    if (!fieldDraft) return;
+    const value = raw.trim();
+    if (key === "formula" && value && !parseFormula(value).ok) return;
+    const patch: ScoreOverride =
+      key === "formula" ? { formula: value || undefined }
+      : key === "name" ? { name: value || undefined }
+      : key === "unit" ? { unit: value || undefined }
+      : { description: value || undefined };
+    setOverrides((m) => setFormulaOverride(m, fieldDraft.id, patch));
+  };
+
+  /** The built-in spec behind an indicator — the reference the editor edits from. */
+  const baseSpecOf = (id: string): IndicatorSpec | undefined => {
+    const builtIn = getSpec(id);
+    if (builtIn) return builtIn;
+    const def = custom.find((c) => c.id === id);
+    return def ? specForCustom(def) : undefined;
+  };
+
   // Persist user-defined indicators on every change.
   useEffect(() => { saveCustom(custom); }, [custom]);
-  // Escape closes the right-click formula editor.
+  // Escape closes the right-click formula editor — unless the help drawer is on
+  // top of it, which closes itself first (both listen for Escape).
   useEffect(() => {
     if (!menu) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !helpOpen) closeMenu(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu]);
+  }, [menu, helpOpen]);
 
   // ─── User-defined indicator editor ────────────────────────────
   const openIndicatorEditor = (def: CustomIndicatorDef) => {
@@ -420,10 +513,10 @@ export default function MegaIndicatorPage() {
 
   useEffect(() => {
     if (!editorOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeEditor(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !helpOpen) closeEditor(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editorOpen]);
+  }, [editorOpen, helpOpen]);
 
   // Validation is pure, so it runs during render — the effect below therefore
   // never has to setState just to report a parse error.
@@ -501,6 +594,7 @@ export default function MegaIndicatorPage() {
       try {
         const params = new URLSearchParams({ ticker, years: String(historyYears) });
         if (custom.length) params.set("custom", JSON.stringify(custom));
+        if (overridePayload) params.set("overrides", overridePayload);
         const res = await fetch(`/api/mega-history?${params.toString()}`, { cache: "no-store" });
         const json = await res.json();
         if (cancelled) return;
@@ -513,7 +607,7 @@ export default function MegaIndicatorPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [ticker, historyYears, custom]);
+  }, [ticker, historyYears, custom, overridePayload]);
 
   const historyData = useMemo(() => {
     if (!history?.points?.length) return [];
@@ -656,6 +750,8 @@ export default function MegaIndicatorPage() {
   const [pickerOpen, setPickerOpen] = useState(false);
   // Click ⓘ on an indicator row for its full spec.
   const [indDetail, setIndDetail] = useState<MegaIndicator | null>(null);
+  const presetLabel =
+    preset === "custom" ? "✎ Custom" : PRESETS.find((p) => p.key === preset)?.label ?? "✎ Custom";
   const inCompositeCount = data
     ? data.indicators.filter((i) => effectiveWeight(i, weights) > 0).length
     : 0;
@@ -683,6 +779,20 @@ export default function MegaIndicatorPage() {
 
   const score = view?.score ?? 0;
   const col = scoreColor(score);
+
+  // ─── Where this reading sits in the ticker's own history ──────
+  // The reference series is re-blended from the chart history's per-indicator
+  // scores under the CURRENT weights, so the percentile compares one composite
+  // with itself. The chart's own line keeps the shipped weights on purpose (it is
+  // cached, and moving a slider must not rewrite the past), which would otherwise
+  // make the two incomparable the moment a user picks a preset or moves a slider.
+  const historyScores = useMemo(
+    () => blendScoreHistory(history?.points ?? [], weights),
+    [history, weights]
+  );
+  const percentile = useMemo(() => scorePercentile(historyScores, score), [historyScores, score]);
+  const historyWindowLabel =
+    HISTORY_WINDOWS.find((w) => w.y === historyYears)?.label ?? `${historyYears}Y`;
   // Baseline decision for this score: buy / hold / sell (lib/mega-indicator
   // owns the bands so the UI and any strategy read the same rule).
   const action = actionFor(score);
@@ -795,6 +905,14 @@ export default function MegaIndicatorPage() {
             ↺ Reset
           </button>
         </div>
+
+        <button
+          onClick={() => setHelpOpen(true)}
+          title="What a weight means, what each preset does, and how the two formula editors work"
+          className="px-3 py-2 text-xs font-medium rounded-lg border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)]"
+        >
+          ? How this works
+        </button>
       </div>
 
       {/* ─── Live price strip (3s polling) ─────────────────────── */}
@@ -1009,8 +1127,16 @@ export default function MegaIndicatorPage() {
                   <span className={`px-3 py-1 rounded-full border text-sm font-bold tracking-wide ${actionCls}`}>
                     {action.label}
                   </span>
+                  {percentile && (
+                    <span
+                      className="px-2.5 py-1 rounded-full bg-[var(--card-hover)] text-[11px] font-medium text-[var(--muted)]"
+                      title={`This reading is higher than ${percentile.percentile}% of the ticker's own Mega Score readings over the charted window (${historyWindowLabel}, ${percentile.readings} readings${history ? `, ${history.from} → ${history.to}` : ""}), re-blended with the weights you have set. A position in its own past — not a forecast.`}
+                    >
+                      p{percentile.percentile} of its own {historyWindowLabel} history
+                    </span>
+                  )}
                   <span className="text-[11px] text-[var(--muted)]">
-                    Baseline: Buy ≥ 65 · Hold 35–65 · Sell &lt; 35
+                    Baseline: Buy ≥ {MEGA_BUY_ABOVE} · Hold {MEGA_SELL_BELOW}–{MEGA_BUY_ABOVE} · Sell &lt; {MEGA_SELL_BELOW}
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--muted)] mb-4">{action.detail}</p>
@@ -1070,14 +1196,7 @@ export default function MegaIndicatorPage() {
                   ))}
                 </select>
                 <div className="flex items-center bg-[var(--card)] border border-[var(--card-border)] rounded-lg p-0.5">
-                  {([
-                    { y: 1 / 12, label: "1M (30d)" },
-                    { y: 0.5, label: "6M" },
-                    { y: 1, label: "1Y" },
-                    { y: 3, label: "3Y" },
-                    { y: 5, label: "5Y" },
-                    { y: 10, label: "10Y" },
-                  ] as Array<{ y: number; label: string }>).map(({ y, label }) => (
+                  {HISTORY_WINDOWS.map(({ y, label }) => (
                     <button key={label} onClick={() => setHistoryYears(y)}
                       className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                         historyYears === y ? "bg-indigo-600 text-white" : "text-[var(--muted)] hover:text-[var(--foreground)]"
@@ -1169,7 +1288,16 @@ export default function MegaIndicatorPage() {
                 />
                 <span className="text-xs text-[var(--muted)]">
                   Total weight: <b className="text-[var(--foreground)]">{totalEffectiveWeight.toFixed(1)}</b> across {inCompositeCount} of {data?.indicators.length} indicators
-                  <span className="hidden sm:inline"> · right-click an indicator to edit its formula</span>
+                  <span className="hidden sm:inline"> · a weight is its share of that total</span>
+                  {" · "}
+                  <button
+                    onClick={() => setHelpOpen(true)}
+                    title="Weights, presets and the formula editors explained"
+                    className="underline decoration-dotted hover:text-[var(--foreground)]"
+                  >
+                    how weights work
+                  </button>
+                  <span className="hidden sm:inline"> · right-click a row to edit its scoring rule</span>
                 </span>
                 {customFormulaCount > 0 && (
                   <button
@@ -1213,10 +1341,20 @@ export default function MegaIndicatorPage() {
                         {items.map((ind) => {
                           const w = effectiveWeight(ind, weights);
                           const wPct = weightShares[ind.id] ?? 0;
+                          // Compare against the BUILT-IN (the API returns the
+                          // already-patched indicator), so an edited indicator
+                          // still reads as edited and can be reset.
+                          const bSpec = baseSpecOf(ind.id);
+                          const scoringBase = bSpec
+                            ? { direction: bSpec.direction, thresholds: bSpec.thresholds }
+                            : { direction: ind.direction, thresholds: ind.thresholds };
+                          const edited = bSpec
+                            ? isOverrideChanged(bSpec, overrides[ind.id])
+                            : isFormulaChanged(scoringBase, overrides[ind.id]);
                           return (
                             <div key={ind.id}
-                              onContextMenu={(e) => { e.preventDefault(); setMenu({ id: ind.id, x: e.clientX, y: e.clientY }); }}
-                              title="Right-click to edit this indicator's formula"
+                              onContextMenu={(e) => openMenu(e, ind)}
+                              title="Right-click to edit this indicator's formula and fields"
                               className={`px-4 py-3 transition-colors cursor-context-menu ${w <= 0 ? "opacity-50" : w > 1 ? "bg-indigo-500/[0.04]" : ""}`}>
                               <div className="flex flex-wrap items-center gap-3">
                                 {/* Name + value */}
@@ -1283,10 +1421,15 @@ export default function MegaIndicatorPage() {
                               <p className="text-[10px] text-[var(--muted)] mt-1 line-clamp-1">{ind.description}</p>
                               <p className="text-[10px] mt-0.5 flex items-center gap-1.5">
                                 <span className="text-[var(--muted)]">
-                                  ƒ {formulaLabel(mergeFormula({ direction: ind.direction, thresholds: ind.thresholds }, overrides[ind.id]))}
+                                  ƒ {formulaLabel(mergeFormula(scoringBase, overrides[ind.id]))}
                                 </span>
-                                {isFormulaChanged({ direction: ind.direction, thresholds: ind.thresholds }, overrides[ind.id]) && (
-                                  <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300">custom</span>
+                                {edited && (
+                                  <span
+                                    title={`You edited this indicator${overrides[ind.id]?.formula ? " — it uses your formula instead of the built-in calculation" : ""} · right-click it to change or reset the edit`}
+                                    className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300"
+                                  >
+                                    {overrides[ind.id]?.formula ? "your formula" : "edited"}
+                                  </span>
                                 )}
                                 {ind.category === "Custom" && custom.find((c) => c.id === ind.id) && (
                                   <span className="flex items-center gap-1.5 ml-auto">
@@ -1383,6 +1526,17 @@ export default function MegaIndicatorPage() {
             </code>
           ) },
         ] : []}
+      />
+
+      {/* ─── In-app explainer for weights / presets / formula editors ── */}
+      <MegaIndicatorHelp
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        presetLabel={presetLabel}
+        totalWeight={totalEffectiveWeight}
+        inComposite={inCompositeCount}
+        totalIndicators={data?.indicators.length ?? 0}
+        customCount={custom.length}
       />
 
       {/* ─── Searchable indicator picker ("Add Indicator") ──────── */}
@@ -1554,6 +1708,22 @@ export default function MegaIndicatorPage() {
               </label>
             </div>
 
+            <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+              {draft.direction === "higher"
+                ? "Raw readings at or below the first number score 0, at or above the second 100, linear in between."
+                : draft.direction === "lower"
+                  ? "Raw readings at or below the first number score 100, at or above the second 0, linear in between."
+                  : "Readings inside the band score 60–100 (100 mid-band); outside it they fall to 0 at 75 % of the band width past the edge."}{" "}
+              Thresholds and direction score the value — they never change the formula above.{" "}
+              <button
+                type="button"
+                onClick={() => setHelpOpen(true)}
+                className="underline decoration-dotted hover:text-[var(--foreground)]"
+              >
+                More on how scoring works
+              </button>
+            </p>
+
             <label className="block">
               <span className="text-xs text-[var(--muted)]">Description (optional)</span>
               <input
@@ -1596,18 +1766,27 @@ export default function MegaIndicatorPage() {
       {menu && data && (() => {
         const ind = data.indicators.find((i) => i.id === menu.id);
         if (!ind) return null;
-        const base = { direction: ind.direction, thresholds: ind.thresholds };
+        // The BUILT-IN spec is the reference: the API returns the already-patched
+        // indicator, so comparing against its own fields would always say
+        // "unchanged" and leave an edited indicator with no way back.
+        const baseSpec = baseSpecOf(ind.id);
+        const base = baseSpec
+          ? { direction: baseSpec.direction, thresholds: baseSpec.thresholds }
+          : { direction: ind.direction, thresholds: ind.thresholds };
         const ov = overrides[ind.id] || {};
         const eff = mergeFormula(base, ov);
-        const changed = isFormulaChanged(base, ov);
+        const changed = baseSpec ? isOverrideChanged(baseSpec, ov) : isFormulaChanged(base, ov);
+        const draft = fieldDraft?.id === ind.id ? fieldDraft : null;
+        const formulaCheck = draft && draft.formula.trim() ? parseFormula(draft.formula) : null;
+        const formulaErr = formulaCheck && !formulaCheck.ok ? formulaCheck.error : null;
         const px = typeof window !== "undefined" ? Math.min(menu.x, window.innerWidth - 300) : menu.x;
         const py = typeof window !== "undefined" ? Math.min(menu.y, window.innerHeight - 350) : menu.y;
         const w = effectiveWeight(ind, weights);
         return (
           <div
             className="fixed inset-0 z-50"
-            onClick={() => setMenu(null)}
-            onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
+            onClick={closeMenu}
+            onContextMenu={(e) => { e.preventDefault(); closeMenu(); }}
           >
             <div
               className="absolute w-80 rounded-xl border border-[var(--card-border)] bg-[var(--card)] shadow-2xl p-3 text-xs space-y-2 max-h-[85vh] overflow-y-auto"
@@ -1616,7 +1795,7 @@ export default function MegaIndicatorPage() {
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-sm truncate" title={ind.name}>{ind.name}</span>
-                <button onClick={() => setMenu(null)} className="text-[var(--muted)] hover:text-[var(--foreground)]" aria-label="Close">✕</button>
+                <button onClick={closeMenu} className="text-[var(--muted)] hover:text-[var(--foreground)]" aria-label="Close">✕</button>
               </div>
 
               {/* What it does */}
@@ -1624,10 +1803,17 @@ export default function MegaIndicatorPage() {
 
               {/* The exact calculation behind the number */}
               <div className="rounded-lg border border-[var(--card-border)] bg-[var(--card-hover)] p-2">
-                <p className="text-[9.5px] uppercase tracking-wider text-[var(--muted)] mb-1">How it&apos;s calculated</p>
-                <p className="font-mono text-[10.5px] leading-relaxed break-words">
-                  {ind.formula || "—"}
+                <p className="text-[9.5px] uppercase tracking-wider text-[var(--muted)] mb-1">
+                  {ov.formula ? "Built-in calculation" : "How it's calculated"}
                 </p>
+                <p className="font-mono text-[10.5px] leading-relaxed break-words">
+                  {baseSpec?.formula || ind.formula || "—"}
+                </p>
+                {ov.formula && (
+                  <p className="mt-1.5 text-[10px] text-indigo-500 dark:text-indigo-300">
+                    Replaced by your formula: <span className="font-mono break-words">{ov.formula}</span>
+                  </p>
+                )}
                 <p className="text-[10px] text-[var(--muted)] mt-1.5">
                   Reading: {ind.direction === "higher" ? "higher is healthier" : ind.direction === "lower" ? "lower is healthier" : "middle of the band is healthiest"}
                   {" · "}score {scoreWithOverride(ind.value, base, ov).toFixed(1)} / 100
@@ -1690,16 +1876,89 @@ export default function MegaIndicatorPage() {
                 </label>
               </div>
 
+              {/* ─── Edit the indicator itself: formula and every other field ─── */}
+              {draft && (
+                <div className="rounded-lg border border-[var(--card-border)] p-2 space-y-2">
+                  <p className="text-[9.5px] uppercase tracking-wider text-[var(--muted)]">
+                    Edit this indicator {baseSpec ? "— leave a field blank to keep the built-in" : ""}
+                  </p>
+
+                  <label className="block">
+                    <span className="text-[10px] text-[var(--muted)]">Formula (replaces the calculation above)</span>
+                    <textarea
+                      value={draft.formula}
+                      rows={2}
+                      maxLength={MAX_FORMULA_LEN}
+                      spellCheck={false}
+                      placeholder={baseSpec?.formula ? "e.g. rsi(close, 9)" : "e.g. (close - sma(close, 20)) / sma(close, 20) * 100"}
+                      onChange={(e) => setFieldDraft({ ...draft, formula: e.target.value })}
+                      onBlur={(e) => commitOverrideField("formula", e.target.value)}
+                      className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded font-mono text-[10.5px] focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                    {formulaErr ? (
+                      <span className="block mt-0.5 text-[10px] text-[var(--danger)]">{formulaErr}</span>
+                    ) : (
+                      <span className="block mt-0.5 text-[9.5px] leading-relaxed text-[var(--muted)]">
+                        Saved when the box loses focus · variables {Object.keys(VARS).join(", ")} · functions{" "}
+                        {Object.keys(FUNCS).join("(), ")}()
+                      </span>
+                    )}
+                  </label>
+
+                  <div className="flex items-end gap-2">
+                    <label className="flex-1">
+                      <span className="text-[10px] text-[var(--muted)]">Name</span>
+                      <input
+                        value={draft.name}
+                        maxLength={MAX_OVERRIDE_NAME}
+                        placeholder={baseSpec?.name ?? ""}
+                        onChange={(e) => setFieldDraft({ ...draft, name: e.target.value })}
+                        onBlur={(e) => commitOverrideField("name", e.target.value)}
+                        className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    </label>
+                    <label className="w-16">
+                      <span className="text-[10px] text-[var(--muted)]">Unit</span>
+                      <input
+                        value={draft.unit}
+                        maxLength={MAX_OVERRIDE_UNIT}
+                        placeholder={baseSpec?.unit || "—"}
+                        onChange={(e) => setFieldDraft({ ...draft, unit: e.target.value })}
+                        onBlur={(e) => commitOverrideField("unit", e.target.value)}
+                        className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="block">
+                    <span className="text-[10px] text-[var(--muted)]">Description</span>
+                    <input
+                      value={draft.description}
+                      maxLength={MAX_OVERRIDE_DESC}
+                      placeholder={baseSpec?.description ?? ""}
+                      onChange={(e) => setFieldDraft({ ...draft, description: e.target.value })}
+                      onBlur={(e) => commitOverrideField("description", e.target.value)}
+                      className="w-full mt-0.5 px-2 py-1 bg-[var(--input-bg)] border border-[var(--input-border)] rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </label>
+
+                  <p className="text-[9.5px] leading-relaxed text-[var(--muted)]">
+                    Edits apply wherever this indicator is scored: the composite, the score history and any backtest run
+                    from this app. A built-in whose formula you replace is listed with your formula in the panel below.
+                  </p>
+                </div>
+              )}
+
               <div className="flex items-center justify-between pt-1">
                 <button
                   onClick={() => setOverrides((m) => clearFormulaOverride(m, ind.id))}
                   disabled={!changed}
                   className="px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  Reset formula
+                  Reset to built-in
                 </button>
                 <button
-                  onClick={() => { setWeight(ind.id, 0); setMenu(null); }}
+                  onClick={() => { setWeight(ind.id, 0); closeMenu(); }}
                   className="px-2 py-1 rounded border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
                 >
                   Exclude

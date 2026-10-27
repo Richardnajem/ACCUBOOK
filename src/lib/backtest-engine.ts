@@ -4,9 +4,10 @@
 
 import { getDailyBars, Bar } from "./market-data";
 import { getStrategy, defaultParams, STRATEGIES, type StrategyDef } from "./strategies";
-import { sma } from "./ta";
+import { sma, atr } from "./ta";
+import { barCadence, resampleBars, type BarInterval, type BarUnit } from "./bar-resample";
 import { computeMegaScoreSeries } from "./mega-score";
-import type { WeightMap } from "./mega-indicator";
+import { ALL_SPECS, defaultWeights, type IndicatorOverrideMap, type WeightMap } from "./mega-indicator";
 
 export interface BacktestConfig {
   symbol: string;
@@ -22,6 +23,18 @@ export interface BacktestConfig {
   /** Hard entry budget: no new position once this many trades have been opened (0/undefined = unlimited). */
   maxTrades?: number;
   /**
+   * Day-trading mode: close whatever is open at each session's last bar (fill at
+   * that bar's close) and never open a position whose fill lands in the next
+   * session. Ignored on daily bars, where it would mean "always flat".
+   */
+  flatAtSessionEnd?: boolean;
+  /**
+   * How often the rule is allowed to act: daily (default), weekly or monthly.
+   * The daily series is resampled before the simulation, so the same strategy
+   * and the same costs are compared at each frequency.
+   */
+  barInterval?: BarInterval;
+  /**
    * Quality floor: the run should close at least this many trades. A single
    * backtest is flagged when it falls short, and the optimizer / walk-forward
    * refuse to rank a candidate below the floor (0/undefined = no minimum).
@@ -29,6 +42,9 @@ export interface BacktestConfig {
   minTrades?: number;
   benchmarkSymbol?: string; // default: same ticker (its buy & hold)
   megaWeights?: WeightMap; // per-indicator weights for the Mega Score strategy/chart overlay
+  /** Per-indicator formula/field edits from the Mega Indicator page (same ones
+   *  the live composite uses), applied to the strategy and the chart overlay. */
+  megaOverrides?: IndicatorOverrideMap;
 }
 
 export interface TradeRecord {
@@ -48,12 +64,17 @@ export interface TradeRecord {
    *  smooths. Null when the run skipped the score series (bulk compare/optimize)
    *  or the bar had no reading yet. */
   entryScore?: number | null;
+  /** The bar whose close produced the entry signal (one session before the fill).
+   *  Used to pull that day's per-indicator breakdown. */
+  entrySignalDate?: string | null;
   /** Mega Score on the entry fill day's close (the fill itself is at its open). */
   entryFillScore?: number | null;
   /** Mega Score that triggered the exit. For a signal exit that is the previous
    *  close (smoothed like the entry); a stop/target exit fires intra-bar, so it
    *  is the exit day's score. Null for an end-of-test close. */
   exitScore?: number | null;
+  /** The bar whose reading triggered the exit (null for an end-of-test close). */
+  exitSignalDate?: string | null;
   /** Mega Score on the exit fill day's close. */
   exitFillScore?: number | null;
   /** True when this long re-opened right after a stop/target exit while the
@@ -62,7 +83,14 @@ export interface TradeRecord {
   reentry?: boolean;
 }
 
-export type ExitReason = "signal" | "stop-loss" | "take-profit" | "end-of-test";
+export type ExitReason =
+  | "signal"
+  | "stop-loss"
+  | "take-profit"
+  | "trailing-stop"
+  /** Closed at the last bar of the session because `flatAtSessionEnd` is set (day-trading mode). */
+  | "session-close"
+  | "end-of-test";
 
 export interface RiskStats {
   expectancyPct: number;       // avg return per trade (what a "typical" trade yields)
@@ -116,6 +144,35 @@ export interface EquityPoint {
   invested: boolean;
 }
 
+/**
+ * The run's risk profile, all measured from the same daily equity curve the
+ * Sharpe ratio uses — no modelled inputs except the risk factor itself.
+ */
+export interface RiskMetrics {
+  /** Annualized stdev of the strategy's daily returns, %. */
+  annualVolPct: number;
+  /** Annualized stdev of the benchmark's daily returns over the same days, %. */
+  benchmarkVolPct: number;
+  /** Strategy beta to the benchmark (daily returns). 1 = moves with it. */
+  beta: number;
+  /** Annualized downside deviation (negative days only), %. */
+  downsideDevPct: number;
+  /** Ulcer index: RMS of daily drawdown depth in percentage points (lower = calmer). */
+  ulcerIndex: number;
+  /**
+   * 0-100 risk factor (lower = calmer), modelled from three measured pieces:
+   *   40 % volatility relative to the benchmark (1× benchmark = 20 points,
+   *         2× or more = 40 points)
+   *   35 % Ulcer index (15 points of ulcer depth = 35)
+   *   25 % max drawdown (50 % drawdown = 25)
+   * It exists so two runs can be compared on one number; the three components
+   * are always shown beside it, and no component is hidden in the blend.
+   */
+  riskFactor: number;
+  /** Bucket for the risk factor: <25 Low, <45 Moderate, <65 Elevated, else High. */
+  riskLevel: "Low" | "Moderate" | "Elevated" | "High";
+}
+
 export interface BacktestSummary extends RiskStats {
   finalEquity: number;
   totalReturnPct: number;
@@ -134,6 +191,21 @@ export interface BacktestSummary extends RiskStats {
   worstTradePct: number;
   avgBarsHeld: number;
   timeInMarketPct: number;
+  /** Closed trades per year — the frequency the win rate and avg trade belong to. */
+  tradesPerYear: number;
+  /** Median minutes between bars: 1440 daily, 10080 weekly, ~43200 monthly, 5 intraday. */
+  barMinutes: number;
+  /** What one bar represents — drives every "per day" label in the UI. */
+  barUnit: BarUnit;
+  /**
+   * Bars per year used to annualize Sharpe/Sortino/volatility: 252 daily, 52
+   * weekly, 12 monthly, 252 × (390 / barMinutes) intraday. Derived from the bar
+   * spacing, because annualizing a weekly Sharpe with sqrt(252) overstates it by
+   * 2.2× and a monthly one by 4.6×.
+   */
+  periodsPerYear: number;
+  /** Volatility, beta, downside, ulcer and the 0-100 risk factor. */
+  risk: RiskMetrics;
 }
 
 export interface BacktestOutput {
@@ -232,14 +304,23 @@ export function resolveCosts(config: BacktestConfig): ResolvedCosts {
   };
 }
 
-async function loadBars(symbol: string, years: number, strategy: StrategyDef) {
+async function loadBars(
+  symbol: string,
+  years: number,
+  strategy: StrategyDef,
+  interval: BarInterval = "daily"
+) {
   const { bars, meta, source } = await getDailyBars(symbol, years);
-  if (bars.length < strategy.minBars) {
+  // The minimum-history check is on the RAW series: a strategy that needs 210
+  // daily bars cannot be judged on 180 monthly bars, but resampling is not a
+  // reason to refuse the run either — the caller sees the shorter series and the
+  // cadence warning.
+  if (bars.length < Math.min(strategy.minBars, 60)) {
     throw new Error(
       `"${meta.name}" has only ${bars.length} daily bars; ${strategy.name} needs about ${strategy.minBars}. Pick a longer history or another ticker.`
     );
   }
-  return { bars, meta, source };
+  return { bars: resampleBars(bars, interval), meta, source, rawBars: bars.length, interval };
 }
 
 export async function runStockBacktest(config: BacktestConfig): Promise<BacktestOutput> {
@@ -250,7 +331,7 @@ export async function runStockBacktest(config: BacktestConfig): Promise<Backtest
   if (strategy.validate && !strategy.validate(params)) {
     throw new Error(`Invalid parameters for ${strategy.name}: ${strategy.params.map(p => `${p.label}: ${params[p.key]}`).join(', ')}.`);
   }
-  const { bars, meta, source } = await loadBars(config.symbol, costs.years, strategy);
+  const { bars, meta, source } = await loadBars(config.symbol, costs.years, strategy, config.barInterval ?? "daily");
 
   // Optional external benchmark (e.g. run NVDA vs SPY). Falls back to the
   // strategy ticker's own buy & hold when the benchmark can't be loaded.
@@ -293,8 +374,24 @@ export function simulateCore(
   const close = bars.map(b => b.close);
   const volume = bars.map(b => b.volume);
 
+  // ── Bar cadence ─────────────────────────────────────────────
+  // Daily, weekly, monthly and intraday bars all arrive through the same `Bar`
+  // shape, so the engine works out which one it has from the spacing instead of
+  // trusting a flag — and annualizes on what it found.
+  const { barMinutes, periodsPerYear, barUnit } = barCadence(bars);
+  const intraday = barUnit === "minute";
+  /** True on the last bar of each session — where day-trading mode flattens. */
+  const sessionLast: boolean[] = bars.map(
+    (b, i) => i === bars.length - 1 || b.date.slice(0, 10) !== bars[i + 1].date.slice(0, 10)
+  );
+  const flatAtSessionEnd = Boolean(config.flatAtSessionEnd) && intraday;
+
   const params = { ...defaultParams(strategy), ...(config.params || {}) };
-  const positions = strategy.generate({ open, high, low, close, volume, params, megaWeights: config.megaWeights });
+  const positions = strategy.generate({
+    open, high, low, close, volume, params,
+    megaWeights: config.megaWeights,
+    megaOverrides: config.megaOverrides,
+  });
 
   const commissionRate = commissionBps / 10000;
   const slippageRate = slippageBps / 10000;
@@ -302,6 +399,17 @@ export function simulateCore(
   // Optional fixed-percentage risk exits (0/undefined = disabled).
   const stopMult = config.stopLossPct && config.stopLossPct > 0 ? 1 - config.stopLossPct / 100 : null;
   const tpMult = config.takeProfitPct && config.takeProfitPct > 0 ? 1 + config.takeProfitPct / 100 : null;
+
+  // Optional ATR trailing stop, driven by the strategy's own params so only the
+  // strategies that ask for it (mega_score_fast) get one. The stop trails the
+  // highest CLOSE since entry by `trailAtr × ATR(atrPeriod)`. It is evaluated
+  // against yesterday's ATR and yesterday's high-water mark, then the high-water
+  // mark is advanced — a bar never sets the level it is tested against.
+  const trailMultRaw = Number(params.trailAtr);
+  const trailMult = Number.isFinite(trailMultRaw) && trailMultRaw > 0 ? trailMultRaw : null;
+  const trailAtrPeriod = Math.max(2, Math.round(Number(params.atrPeriod) || 14));
+  const trailAtr = trailMult !== null ? atr(high, low, close, trailAtrPeriod) : null;
+  let trailHigh = 0;
 
   // Optional trade budget (cap on entries) and quality floor (warning only).
   const maxTrades = config.maxTrades && config.maxTrades > 0 ? Math.floor(config.maxTrades) : null;
@@ -332,15 +440,24 @@ export function simulateCore(
   let entryBar = 0;
   /** Bar of the last stop/target exit — the next bar's buy is a re-entry. */
   let lastRiskExitBar = -1;
+  /**
+   * True after an ATR trailing stop fired: the strategy's own signal is still
+   * "long" (the trail left before the score did), and re-buying on that stale
+   * signal is how a trailing stop turns into a churn machine — buy, stop out,
+   * buy again on the same reading. The block clears only once the signal has gone
+   * flat, i.e. when the rule itself would re-enter. Fixed stop-loss/target exits
+   * keep their existing behaviour (they are the user's own risk layer).
+   */
+  let trailBlocked = false;
   // Mega Score per bar, so each trade can carry the reading on its actual
   // entry/exit day. Only full single runs compute it (the price chart needs the
   // same series); bulk compare/optimize skip it, exactly like `priceSeries`.
   const megaScores: number[] | null = charts
-    ? computeMegaScoreSeries({ high, low, close, volume, open }, config.megaWeights).score
+    ? computeMegaScoreSeries({ high, low, close, volume, open }, config.megaWeights, undefined, config.megaOverrides).score
     : null;
   // The Mega Score strategy compares its bands against the smoothed series, so
   // the log records that exact number (plus the raw fill-day reading) — a
-  // "sell ≤ 35" exit should never show 35.1 with no explanation.
+  // "sell < 25" exit should never show 25.1 with no explanation.
   const smoothDays = strategy.id === "mega_score" ? Math.max(1, Math.round(Number(params.smooth) || 1)) : 1;
   const signalScores: number[] | null = megaScores && smoothDays > 1 ? sma(megaScores, smoothDays) : megaScores;
   const round1 = (v: number | undefined): number | null =>
@@ -364,6 +481,7 @@ export function simulateCore(
       hitTradeLimit = true;
       return;
     }
+    if (trailMult !== null) trailHigh = open[i]; // fresh high-water mark for the new position
     const fill = open[i] * (1 + slippageRate);
     const budget = Math.min((cash + shares * close[i - 1]) * (positionPct / 100), cash);
     const sh = Math.floor(budget / (fill * (1 + commissionRate)));
@@ -385,8 +503,10 @@ export function simulateCore(
         bars: 0,
         reason: "signal",
         entryScore: signalScoreAt(i - 1),
+        entrySignalDate: bars[i - 1]?.date ?? null,
         entryFillScore: scoreAt(i),
         exitScore: null,
+        exitSignalDate: null,
         exitFillScore: null,
         reentry: lastRiskExitBar === i - 1,
       });
@@ -421,7 +541,9 @@ export function simulateCore(
       // No score triggered an end-of-test close, so leave the signal reading out
       // rather than mislabel the last bar's score as a sell signal.
       t.exitScore = reason === "signal" ? signalScoreAt(i - 1) : reason === "end-of-test" ? null : scoreAt(i);
-      if (reason === "stop-loss" || reason === "take-profit") lastRiskExitBar = i;
+      t.exitSignalDate = reason === "end-of-test" ? null : reason === "signal" ? bars[i - 1]?.date ?? null : bars[i].date;
+      if (reason === "stop-loss" || reason === "take-profit" || reason === "trailing-stop") lastRiskExitBar = i;
+      if (reason === "trailing-stop") trailBlocked = true;
       const costBasis = t.shares * t.entryPrice;
       const entryFee = costBasis * commissionRate;
       t.pnl = gross - exitFee - costBasis - entryFee;
@@ -432,7 +554,11 @@ export function simulateCore(
 
   // ── Main loop: signal from bar i-1, execute at bar i's open ──
   for (let i = 1; i < bars.length; i++) {
-    const wantLong = positions[i - 1] > 0;
+    // Day-trading mode: a signal on the session's last bar would fill at the next
+    // session's open, i.e. it would be an overnight position. Refuse it.
+    const signalLong = positions[i - 1] > 0 && !(flatAtSessionEnd && sessionLast[i - 1]);
+    if (!signalLong) trailBlocked = false; // the rule went flat — a new crossing may buy
+    const wantLong = signalLong && !trailBlocked;
     const haveLong = shares > 0;
     if (wantLong && !haveLong) buy(i);
     else if (!wantLong && haveLong) sell(i);
@@ -456,6 +582,29 @@ export function simulateCore(
       } else if (tpPx !== null && high[i] >= tpPx) {
         sellAt(i, tpPx * (1 - slippageRate), "take-profit");
       }
+    }
+
+    // ── ATR trailing stop (checked after the fixed risk exits) ──
+    // Stop level comes from the previous bar's high-water mark and ATR; a gap
+    // through it fills at the open, otherwise the stop price is the fill.
+    if (shares > 0 && trailMult !== null && trailAtr) {
+      const aPrev = trailAtr[i - 1];
+      if (Number.isFinite(aPrev) && trailHigh > 0) {
+        const trailPx = trailHigh - trailMult * aPrev;
+        if (open[i] <= trailPx) {
+          sellAt(i, open[i] * (1 - slippageRate), "trailing-stop");
+        } else if (low[i] <= trailPx) {
+          sellAt(i, trailPx * (1 - slippageRate), "trailing-stop");
+        }
+      }
+      if (shares > 0) trailHigh = Math.max(trailHigh, close[i]);
+    }
+
+    // ── Day-trading mode: flat by the close ──
+    // Fills at the last bar's close, so the position never carries overnight
+    // gap risk — which is the whole point of asking whether day trading helps.
+    if (flatAtSessionEnd && shares > 0 && sessionLast[i]) {
+      sellAt(i, close[i] * (1 - slippageRate), "session-close");
     }
 
     const equity = cash + shares * close[i];
@@ -518,7 +667,10 @@ export function simulateCore(
     ? (Math.pow(finalEquity / initialCapital, 1 / yearsElapsed) - 1) * 100
     : -100;
 
-  // Daily returns for Sharpe/Sortino (rf = 0), annualized with sqrt(252)
+  // Per-bar returns for Sharpe/Sortino (rf = 0), annualized with
+  // sqrt(periodsPerYear). The bar count per year is derived from the spacing
+  // rather than assumed: on 5-minute bars there are 78 bars in a 6.5-hour
+  // session, so sqrt(252) would overstate the ratio by ~8.8×.
   const daily: number[] = [];
   for (let i = 1; i < equityCurve.length; i++) {
     daily.push(equityCurve[i].equity / equityCurve[i - 1].equity - 1);
@@ -531,8 +683,8 @@ export function simulateCore(
   const downsideDev = downside.length > 1
     ? Math.sqrt(downside.reduce((s, r) => s + r * r, 0) / downside.length)
     : 0;
-  const sharpe = sdDaily > 0 ? (meanDaily / sdDaily) * Math.sqrt(252) : 0;
-  const sortino = downsideDev > 0 ? (meanDaily / downsideDev) * Math.sqrt(252) : 0;
+  const sharpe = sdDaily > 0 ? (meanDaily / sdDaily) * Math.sqrt(periodsPerYear) : 0;
+  const sortino = downsideDev > 0 ? (meanDaily / downsideDev) * Math.sqrt(periodsPerYear) : 0;
 
   const timeInMarketPct = equityCurve.length ? (investedBars / equityCurve.length) * 100 : 0;
 
@@ -559,6 +711,53 @@ export function simulateCore(
   // Calmar ratio: annualized return / max drawdown (higher is better)
   const calmar = maxDD > 0 ? cagr / maxDD : cagr > 0 ? 99 : 0;
 
+  // ── Risk profile ────────────────────────────────────────────
+  // Volatility, beta and downside deviation come from the same daily returns
+  // the Sharpe ratio uses; the benchmark is the aligned series the equity
+  // curve plots, so the comparison is like-for-like (same sessions).
+  // Same day pairs as `daily`: equityCurve[k] is bar k+1, so a strategy return
+  // spans bars k+1 -> k+2 and the matching benchmark return starts at bar 2.
+  const benchDaily: number[] = [];
+  for (let i = 2; i < benchClose.length; i++) {
+    const prev = benchClose[i - 1];
+    benchDaily.push(prev > 0 ? benchClose[i] / prev - 1 : 0);
+  }
+  const annVol = sdDaily * Math.sqrt(periodsPerYear) * 100;
+  const benchPairs = Math.min(daily.length, benchDaily.length);
+  const benchMeanDaily = benchPairs ? benchDaily.slice(0, benchPairs).reduce((s, r) => s + r, 0) / benchPairs : 0;
+  const benchSdDaily = benchPairs > 1
+    ? Math.sqrt(benchDaily.slice(0, benchPairs).reduce((s, r) => s + Math.pow(r - benchMeanDaily, 2), 0) / (benchPairs - 1))
+    : 0;
+  const annBenchVol = benchSdDaily * Math.sqrt(periodsPerYear) * 100;
+  let covDaily = 0;
+  for (let i = 0; i < benchPairs; i++) covDaily += (daily[i] - meanDaily) * (benchDaily[i] - benchMeanDaily);
+  const beta = benchPairs > 1 && benchSdDaily > 0 ? (covDaily / (benchPairs - 1)) / (benchSdDaily * benchSdDaily) : 0;
+  const annDownside = downsideDev * Math.sqrt(periodsPerYear) * 100;
+  // Ulcer index: root-mean-square of the drawdown depths already on the curve.
+  const ulcerIndex = equityCurve.length
+    ? Math.sqrt(equityCurve.reduce((s, p) => s + p.drawdownPct * p.drawdownPct, 0) / equityCurve.length)
+    : 0;
+  // 0-100 factor — the blend is printed next to it in the UI, never hidden.
+  const riskFactor = Math.round(
+    100 * (
+      0.40 * Math.min(1, annVol / Math.max(1, annBenchVol * 2)) +
+      0.35 * Math.min(1, ulcerIndex / 15) +
+      0.25 * Math.min(1, maxDD / 50)
+    ) * 10
+  ) / 10;
+  const riskLevel: RiskMetrics["riskLevel"] =
+    riskFactor < 25 ? "Low" : riskFactor < 45 ? "Moderate" : riskFactor < 65 ? "Elevated" : "High";
+  const risk: RiskMetrics = {
+    annualVolPct: annVol,
+    benchmarkVolPct: annBenchVol,
+    beta,
+    downsideDevPct: annDownside,
+    ulcerIndex,
+    riskFactor,
+    riskLevel,
+  };
+  const tradesPerYear = closed.length / Math.max(yearsElapsed, 1 / 12);
+
   const summary: BacktestSummary = {
     finalEquity,
     totalReturnPct,
@@ -577,6 +776,11 @@ export function simulateCore(
     worstTradePct: closed.length ? Math.min(...closed.map(t => t.returnPct)) : 0,
     avgBarsHeld: closed.length ? closed.reduce((s, t) => s + t.bars, 0) / closed.length : 0,
     timeInMarketPct,
+    tradesPerYear,
+    barMinutes,
+    barUnit,
+    periodsPerYear,
+    risk,
     expectancyPct: closed.length ? closed.reduce((s, t) => s + t.returnPct, 0) / closed.length : 0,
     payoffRatio: (() => {
       const avgWin = wins.length ? grossProfit / wins.length : 0;
@@ -634,6 +838,17 @@ export function simulateCore(
       `Entry limit reached: no new trades were opened after ${maxTrades} trade${maxTrades === 1 ? "" : "s"}.`
     );
   }
+  if (barUnit !== "day" && barUnit !== "minute" && bars.length < strategy.minBars) {
+    warnings.push(
+      `${strategy.name} usually needs about ${strategy.minBars} daily bars; on ${barUnit}ly bars this run has ${bars.length}. ` +
+        "The signal is valid but its history is short — lengthen the window for a meaningful read."
+    );
+  }
+  if (config.flatAtSessionEnd && !intraday) {
+    warnings.push(
+      "Flat-at-session-end was ignored: this series is daily, so closing at every session's last bar would mean never holding a position."
+    );
+  }
 
   return {
     symbol: config.symbol.trim().toUpperCase(),
@@ -645,7 +860,10 @@ export function simulateCore(
     dateTo: bars[bars.length - 1].date,
     bars: bars.length,
     dataSource: source,
-    config: { ...config, initialCapital, commissionBps, slippageBps, positionPct, years: costs.years },
+    // `params` here is the merged set the run actually used, so a caller that
+    // sent {} still sees the strategy's real bands (e.g. Mega Score 70 / 25)
+    // instead of an empty object.
+    config: { ...config, params, initialCapital, commissionBps, slippageBps, positionPct, years: costs.years },
     summary,
     equityCurve,
     trades: trades.map((t, idx) => ({ ...t, id: idx + 1 })),
@@ -662,11 +880,26 @@ function clamp(v: number, lo: number, hi: number): number {
   return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : lo;
 }
 
+
+
 // Human-readable description of the weights behind the plotted mega score
 // (defaults, a named preset, or a custom weight map).
+//
+// The app's default is the BALANCED baseline (RSI/Bollinger lead), not an
+// equal-weight average — so a run that sends no weights must say "balanced",
+// and "Everything" is the preset that actually equal-weights the built-ins.
 function describeMegaWeights(weights?: WeightMap): string {
-  if (!weights || Object.keys(weights).length === 0 || Object.values(weights).every((v) => v === 1)) {
-    return "Composite of all technical indicators, equally weighted (0-100), trailing windows only — no look-ahead.";
+  const baseline = defaultWeights(ALL_SPECS);
+  const isDefault = (w: WeightMap) =>
+    ALL_SPECS.every((spec) => (w[spec.id] ?? baseline[spec.id] ?? 0) === (baseline[spec.id] ?? 0));
+  const isEverything = (w: WeightMap) =>
+    ALL_SPECS.every((spec) => (w[spec.id] ?? 0) === (spec.optional ? 0 : 1));
+
+  if (!weights || Object.keys(weights).length === 0 || isDefault(weights)) {
+    return "⚖️ Balanced baseline weights (RSI and Bollinger position 20 weight each ≈21% of the composite, MACD 10, the rest sized by signal — calibrated Oct 2026) — composite 0-100, trailing windows only, no look-ahead.";
+  }
+  if (isEverything(weights)) {
+    return "⚖️ Everything preset — all built-in indicators equally weighted, catalogue indicators excluded (0-100), trailing windows only, no look-ahead.";
   }
   const presets: Array<{ match: (w: WeightMap) => boolean; label: string }> = [
     { match: (w) => w["ta-trend-50-200"] === 4 && w["ta-kernel-slope"] === 4, label: "🧭 Trend preset" },
@@ -695,6 +928,13 @@ export interface ComparisonRow {
   winRate: number;
   profitFactor: number;
   totalTrades: number;
+  /** Closed trades per year, so frequency is comparable across strategies. */
+  tradesPerYear: number;
+  /** Average return per closed trade, net of costs. */
+  avgTradeReturnPct: number;
+  /** 0-100 modelled risk factor (lower = calmer). */
+  riskFactor: number;
+  riskLevel: RiskMetrics["riskLevel"];
   timeInMarketPct: number;
   beatsBuyHold: boolean;
   error: string | null;
@@ -706,6 +946,10 @@ export interface ComparisonResult {
   dateFrom: string;
   dateTo: string;
   bars: number;
+  /** Bars per year and the bar length, so the table can label its own cadence. */
+  periodsPerYear: number;
+  barMinutes: number;
+  barUnit: BarUnit;
   dataSource: "cache" | "yahoo";
   benchmarkReturnPct: number;
   benchmarkMaxDrawdownPct: number;
@@ -717,7 +961,7 @@ export async function runStrategyComparison(config: BacktestConfig): Promise<Com
   const costs = resolveCosts(config);
   const buyHold = getStrategy("buy_hold");
   if (!buyHold) throw new Error("buy_hold strategy missing");
-  const { bars, meta, source } = await loadBars(config.symbol, costs.years, buyHold);
+  const { bars, meta, source } = await loadBars(config.symbol, costs.years, buyHold, config.barInterval ?? "daily");
 
   const rows: ComparisonRow[] = [];
   for (const strategy of STRATEGIES) {
@@ -736,6 +980,10 @@ export async function runStrategyComparison(config: BacktestConfig): Promise<Com
         winRate: out.summary.winRate,
         profitFactor: out.summary.profitFactor,
         totalTrades: out.summary.totalTrades,
+        tradesPerYear: out.summary.tradesPerYear,
+        avgTradeReturnPct: out.summary.avgTradeReturnPct,
+        riskFactor: out.summary.risk.riskFactor,
+        riskLevel: out.summary.risk.riskLevel,
         timeInMarketPct: out.summary.timeInMarketPct,
         beatsBuyHold: out.summary.totalReturnPct > out.summary.benchmarkReturnPct,
         error: null,
@@ -746,6 +994,7 @@ export async function runStrategyComparison(config: BacktestConfig): Promise<Com
         strategyName: strategy.name,
         totalReturnPct: 0, cagr: 0, sharpe: 0, sortino: 0, calmar: 0, maxDrawdownPct: 0,
         winRate: 0, profitFactor: 0, totalTrades: 0, timeInMarketPct: 0,
+        tradesPerYear: 0, avgTradeReturnPct: 0, riskFactor: 0, riskLevel: "Low",
         beatsBuyHold: false,
         error: e instanceof Error ? e.message : "failed",
       });
@@ -763,6 +1012,9 @@ export async function runStrategyComparison(config: BacktestConfig): Promise<Com
     dateFrom: bars[0].date,
     dateTo: bars[bars.length - 1].date,
     bars: bars.length,
+    periodsPerYear: bench.summary.periodsPerYear,
+    barMinutes: bench.summary.barMinutes,
+    barUnit: bench.summary.barUnit,
     dataSource: source,
     benchmarkReturnPct: bench.summary.totalReturnPct,
     benchmarkMaxDrawdownPct: bench.summary.maxDrawdownPct,
@@ -833,7 +1085,7 @@ export async function runStrategyOptimization(config: BacktestConfig): Promise<O
   }
 
   const costs = resolveCosts(config);
-  const { bars, meta, source } = await loadBars(config.symbol, costs.years, strategy);
+  const { bars, meta, source } = await loadBars(config.symbol, costs.years, strategy, config.barInterval ?? "daily");
 
   // Pick the two axes: the two params with the widest [min, max] span.
   // A third (if present) is swept along with the second so it isn't ignored.
@@ -976,7 +1228,7 @@ export async function runWalkForwardOptimization(
   const totalNeeded = trainYears + testYears + 1;
   const { bars, meta, source } = opts?.bars
     ? { bars: opts.bars, meta: { symbol: config.symbol.trim().toUpperCase(), name: config.symbol.trim().toUpperCase(), currency: "USD", exchange: "injected" }, source: "cache" as const }
-    : await loadBars(config.symbol, Math.max(costs.years, totalNeeded), strategy);
+    : await loadBars(config.symbol, Math.max(costs.years, totalNeeded), strategy, config.barInterval ?? "daily");
 
   const warnings: string[] = [];
   const msPerYear = 365.25 * 86400_000;

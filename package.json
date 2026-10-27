@@ -13,6 +13,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "test:calibrate": "cross-env MEGA_LIVE=1 vitest run tests/mega-calibration-live.test.ts --disableConsoleIntercept",
     "update:app": "node scripts/update-app.js",
     "test:updates": "node scripts/test-updates.js",
     "test:update-button": "node tests/electron/verify-update-button.cjs",
