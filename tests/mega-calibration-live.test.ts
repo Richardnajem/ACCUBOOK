@@ -13,6 +13,10 @@
 // between, and the same code path is what /api/mega-train runs.
 //
 // Optional: MEGA_UNIVERSE="SPY,QQQ,..." MEGA_YEARS=15
+//
+// The report ends with a COST SENSITIVITY block (0 / 2 / 10 / 25 bps per side):
+// the shipped rule's held-out excess Sharpe at each level, so "the edge is inside
+// the noise" can be told apart from "the edge is eaten by costs".
 
 import { describe, it, expect } from "vitest";
 import { DEFAULT_WEIGHTS, MEGA_BASELINE } from "../src/lib/mega-indicator";
@@ -296,6 +300,40 @@ describe.runIf(LIVE)("live Mega Score calibration", () => {
         );
       }
       console.log("  " + row.join("  ·  "));
+    }
+
+    // ── Does any of it survive realistic costs? ────────────────
+    // The shipped numbers are measured at 2 bps commission + 2 bps slippage per
+    // side, which is a liquid large-cap assumption. Retail commission is often
+    // zero, but the effective spread on a mid-cap is not, so the question is
+    // whether the result depends on the cost line at all. It is run over four
+    // levels (free, shipped, 10 bps, 25 bps per side) for the shipped rule AND
+    // for the busiest band cell in the grid — cost matters in proportion to
+    // turnover, so a rule with no turnover should show no cost sensitivity and a
+    // busier one should decay visibly. If the shipped rule decays too, the edge
+    // being reported is a cost artifact.
+    console.log("\nCOST SENSITIVITY (balanced weights) — held-out excess Sharpe at bps per side");
+    const costLevels = [0, 2, 10, 25];
+    const costRules: Array<[string, number, number]> = [
+      [`shipped ${MEGA_BASELINE.entry}/${MEGA_BASELINE.exit}`, MEGA_BASELINE.entry, MEGA_BASELINE.exit],
+      ["busier 65/35", 65, 35],
+    ];
+    for (const frac of [0.6, 0.7, 0.8]) {
+      const sp = splitIndex(frames, frac);
+      for (const [ruleLabel, entry, exit] of costRules) {
+        const cells = costLevels.map((bps) => {
+          const v = evaluateVariant(frames, prior, entry, exit, {
+            split: sp,
+            costs: { commissionBps: bps, slippageBps: bps },
+            minTrades: 4,
+          });
+          return (
+            `${bps}bps: x${round(v.test.meanExcessSharpe)} r${round(v.test.meanCagr, 1)}%` +
+            ` ${round(v.test.meanTrades, 2)}t/y ${round(v.test.meanExposurePct, 0)}%inv`
+          );
+        });
+        console.log(`  ${Math.round(frac * 100)}% train · ${ruleLabel} — ` + cells.join("  ·  "));
+      }
     }
 
     expect(summary.length).toBe(CONFIGS.length);

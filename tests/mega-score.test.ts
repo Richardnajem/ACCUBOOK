@@ -79,6 +79,34 @@ describe("mega score time series", () => {
 // strategy, the chart overlay, the trade-log breakdown) — and a formula that
 // cannot run must leave the built-in series in place and say so.
 
+// ─── The kernel pair is backtestable now ────────────────────────
+// They used to be excluded from every series while the live page scored them,
+// so the reading on screen described a composite no backtest had measured.
+// They are scored from ta.kernelTrend's trailing window, which makes them both
+// reproducible and optional (weight 0 in the default map).
+
+describe("computeMegaScoreSeries — the kernel pair", () => {
+  it("scores both kernel indicators causally", () => {
+    const series = computeMegaScoreSeries(bars);
+    for (const id of ["ta-kernel-slope", "ta-kernel-residual"]) {
+      const scores = series.indicators[id];
+      expect(scores, `${id} missing from the series`).toBeDefined();
+      expect(scores.filter((v) => Number.isFinite(v)).length).toBeGreaterThan(300);
+    }
+    // Slope carries a sign, residual is a magnitude — both are scored 0-100.
+    for (const v of series.indicators["ta-kernel-residual"]) {
+      if (Number.isFinite(v)) expect(v >= 0 && v <= 100).toBe(true);
+    }
+  });
+
+  it("is out of the balanced default composite but counted when given weight", () => {
+    const plain = computeMegaScoreSeries(bars);
+    const added = computeMegaScoreSeries(bars, { "ta-kernel-slope": 5 });
+    const differs = plain.score.some((v, i) => Math.abs(v - added.score[i]) > 1e-9);
+    expect(differs, "a weighted kernel leg did not reach the composite").toBe(true);
+  });
+});
+
 describe("computeMegaScoreSeries — user-edited formulas", () => {
   const edited = { "ta-rsi-14": { formula: "rsi(close, 9)" } };
 

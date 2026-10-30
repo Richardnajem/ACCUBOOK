@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runStockBacktest, runStrategyComparison, runStrategyOptimization, runWalkForwardOptimization, BacktestConfig } from '@/lib/backtest-engine';
+import * as XLSX from 'xlsx';
+import { runStockBacktest, runStockBacktestDetailed, runStrategyComparison, runStrategyOptimization, runWalkForwardOptimization, BacktestConfig } from '@/lib/backtest-engine';
+import { buildBacktestWorkbook, backtestFileName } from '@/lib/backtest-export';
 import { STRATEGIES, defaultParams } from '@/lib/strategies';
 import { BAR_INTERVALS, type BarInterval } from '@/lib/bar-resample';
 import { getDailyBars, listCachedSymbols } from '@/lib/market-data';
@@ -38,6 +40,36 @@ function parseMegaOverrides(raw: unknown): IndicatorOverrideMap | undefined {
 function parseBarInterval(raw: unknown): BarInterval {
   const v = String(raw ?? 'daily').toLowerCase();
   return (BAR_INTERVALS as string[]).includes(v) ? (v as BarInterval) : 'daily';
+}
+
+/**
+ * The one place a single-run request becomes a BacktestConfig.
+ *
+ * The run and its Excel export must describe the same backtest — same ticker,
+ * window, costs, bands, weights and per-indicator edits. Two hand-written field
+ * lists would drift and the exported sheet would quietly stop matching the
+ * screen, so both actions read the config from here.
+ */
+function parseRunConfig(data: Record<string, unknown>): BacktestConfig {
+  return {
+    symbol: String(data.symbol || '').trim(),
+    strategyId: String(data.strategyId || ''),
+    initialCapital: Number(data.initialCapital) || 100000,
+    years: Number(data.years) || 10,
+    commissionBps: Number(data.commissionBps ?? 0),
+    slippageBps: Number(data.slippageBps ?? 0),
+    positionPct: Number(data.positionPct ?? 100),
+    params: (data.params && typeof data.params === 'object') ? (data.params as Record<string, number>) : {},
+    stopLossPct: data.stopLossPct != null && Number(data.stopLossPct) > 0 ? Number(data.stopLossPct) : undefined,
+    takeProfitPct: data.takeProfitPct != null && Number(data.takeProfitPct) > 0 ? Number(data.takeProfitPct) : undefined,
+    maxTrades: data.maxTrades != null && Number(data.maxTrades) > 0 ? Math.floor(Number(data.maxTrades)) : undefined,
+    flatAtSessionEnd: Boolean(data.flatAtSessionEnd),
+    barInterval: parseBarInterval(data.barInterval),
+    minTrades: data.minTrades != null && Number(data.minTrades) > 0 ? Math.floor(Number(data.minTrades)) : undefined,
+    benchmarkSymbol: data.benchmarkSymbol ? String(data.benchmarkSymbol).trim().toUpperCase() : undefined,
+    megaWeights: parseMegaWeights(data.megaWeights),
+    megaOverrides: parseMegaOverrides(data.megaOverrides),
+  };
 }
 
 // ─── GET ────────────────────────────────────────────────────────
@@ -80,25 +112,7 @@ export async function POST(request: NextRequest) {
 
     switch (action) {
       case 'runStockBacktest': {
-        const cfg: BacktestConfig = {
-          symbol: String(data.symbol || '').trim(),
-          strategyId: String(data.strategyId || ''),
-          initialCapital: Number(data.initialCapital) || 100000,
-          years: Number(data.years) || 10,
-          commissionBps: Number(data.commissionBps ?? 0),
-          slippageBps: Number(data.slippageBps ?? 0),
-          positionPct: Number(data.positionPct ?? 100),
-          params: (data.params && typeof data.params === 'object') ? data.params : {},
-          stopLossPct: data.stopLossPct != null && Number(data.stopLossPct) > 0 ? Number(data.stopLossPct) : undefined,
-          takeProfitPct: data.takeProfitPct != null && Number(data.takeProfitPct) > 0 ? Number(data.takeProfitPct) : undefined,
-          maxTrades: data.maxTrades != null && Number(data.maxTrades) > 0 ? Math.floor(Number(data.maxTrades)) : undefined,
-          flatAtSessionEnd: Boolean(data.flatAtSessionEnd),
-          barInterval: parseBarInterval(data.barInterval),
-          minTrades: data.minTrades != null && Number(data.minTrades) > 0 ? Math.floor(Number(data.minTrades)) : undefined,
-          benchmarkSymbol: data.benchmarkSymbol ? String(data.benchmarkSymbol).trim().toUpperCase() : undefined,
-          megaWeights: parseMegaWeights(data.megaWeights),
-          megaOverrides: parseMegaOverrides(data.megaOverrides),
-        };
+        const cfg = parseRunConfig(data);
         if (!cfg.symbol) {
           return NextResponse.json({ error: 'Ticker symbol is required (e.g. AAPL).' }, { status: 400 });
         }
@@ -107,6 +121,42 @@ export async function POST(request: NextRequest) {
         }
         const result = await runStockBacktest(cfg);
         return NextResponse.json(result);
+      }
+
+      // The run as a spreadsheet: the summary, every bar (open/high/low/close,
+      // both change readings, volume, Mega Score raw + signal, zone, in-market,
+      // equity, benchmark, drawdown, trade actions), one column per indicator in
+      // its 0-100 score and in its own units, the indicator catalogue, trades,
+      // equity and monthly returns. Re-runs the SAME config, so the file is the
+      // run the button was pressed on.
+      case 'exportWorkbook': {
+        const cfg = parseRunConfig(data);
+        if (!cfg.symbol) {
+          return NextResponse.json({ error: 'Ticker symbol is required (e.g. AAPL).' }, { status: 400 });
+        }
+        if (!cfg.strategyId) {
+          return NextResponse.json({ error: 'Strategy is required.' }, { status: 400 });
+        }
+        const detail = await runStockBacktestDetailed(cfg);
+        const workbook = buildBacktestWorkbook({
+          run: detail.run,
+          bars: detail.bars,
+          series: detail.series,
+          signalScores: detail.signalScores,
+          weights: detail.weights,
+          bands: detail.bands,
+          overrideCount: detail.overrideCount,
+        });
+        const bytes = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+        const filename = backtestFileName(detail.run);
+        return new Response(new Uint8Array(bytes), {
+          headers: {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'Content-Length': String(bytes.byteLength),
+            'Cache-Control': 'no-store',
+          },
+        });
       }
 
       case 'compareStrategies': {

@@ -100,12 +100,13 @@ export default function MegaIndicatorHelp({
                   <>
                     A weight is a <B>share</B>, not a percentage. 20 on RSI and 10 on the MACD
                     histogram means RSI has twice the say — nothing has to add up to 100. The
-                    Balanced map sums to 93.5, and the composite divides by 93.5.
+                    Balanced map sums to 88.5, and the composite divides by 88.5 (the weight it
+                    actually summed).
                   </>,
                   <>
                     The slider runs 0–10 in half steps; the number box beside it accepts up to 20
                     when one reading should dominate. The <B>%</B> on the right is that
-                    indicator&apos;s share of the summed weight (RSI at 20 of 93.5 = 21.4 %).
+                    indicator&apos;s share of the summed weight (RSI at 20 of 88.5 = 22.6 %).
                   </>,
                   <>
                     Weight <B>0</B> takes the indicator out of the composite: its row dims, it stops

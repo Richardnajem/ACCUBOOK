@@ -1,6 +1,10 @@
 // ─── CSV Export ─────────────────────────────────────────────────
-export function downloadCSV(filename: string, headers: string[], rows: (string | number | null | undefined)[][]) {
-  const csvContent = [
+/** RFC-4180-ish CSV text: commas, quotes and newlines are quoted/escaped. */
+export function csvText(
+  headers: (string | number)[],
+  rows: (string | number | null | undefined)[][],
+): string {
+  return [
     headers.join(","),
     ...rows.map((row) =>
       row.map((cell) => {
@@ -13,13 +17,20 @@ export function downloadCSV(filename: string, headers: string[], rows: (string |
       }).join(",")
     ),
   ].join("\n");
+}
 
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+/** Download any text payload (CSV, JSON, plain text) as a file. */
+export function downloadTextFile(filename: string, text: string, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([text], { type: mime });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+export function downloadCSV(filename: string, headers: string[], rows: (string | number | null | undefined)[][]) {
+  downloadTextFile(filename, csvText(headers, rows), "text/csv;charset=utf-8;");
 }
 
 // ─── Print / PDF Export ─────────────────────────────────────────

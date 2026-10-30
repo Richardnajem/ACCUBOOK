@@ -235,6 +235,36 @@ html.sunset .glow {
   outline: none !important;
 }
 
+/* ─── PNG export button (injected by <ChartExporter />) ─── */
+.chart-export-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 6;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+.chart-export-btn:hover,
+.chart-export-btn:focus-visible {
+  opacity: 1;
+  color: var(--primary);
+  border-color: var(--primary);
+  outline: none;
+}
+.chart-export-btn:disabled {
+  cursor: progress;
+}
+
 /* ─── Tables: align digits in currency/number columns ─── */
 table {
   font-variant-numeric: tabular-nums;

@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTheme } from "@/components/ThemeProvider";
 import ImportDialog from "@/components/ImportDialog";
+import { ChartExporter } from "@/components/ChartExporter";
 import { SymbolSuggestionList, useSymbolSuggestions } from "@/components/SymbolSearch";
 import { useUndoRedo } from "@/lib/undo-redo";
 import { dispatchSearch } from "@/lib/search-bus";
@@ -427,6 +428,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         onClose={() => setImportOpen(false)}
         onImported={() => { if (typeof window !== "undefined") window.dispatchEvent(new Event("stockfolio:data-changed")); }}
       />
+
+      {/* Adds a PNG button to every chart on screen (dashboard, research,
+          mega-indicator, backtest, strategies). */}
+      <ChartExporter />
     </div>
   );
 }

@@ -3,8 +3,9 @@
 //
 // Look-ahead safety: the score for date D is derived exclusively from data up
 // to D (trailing windows) — guaranteed by the shared lib/mega-score module,
-// which deliberately excludes the centered Nadaraya-Watson kernel indicators
-// (their centered variant peeks at future bars; the live snapshot keeps them).
+// which evaluates every spec causally, the kernel pair included (lib/ta's
+// kernelTrend uses a trailing window, so the live reading is the last value of
+// this very series).
 //
 // Performance: the walk is O(bars × specs) with small per-spec windows, and
 // results are cached in SQLite per (symbol, weights-hash) so repeat views are
@@ -16,6 +17,13 @@ import { CAUSAL_SPECS, computeMegaScoreSeries } from "./mega-score";
 import type { IndicatorOverrideMap, WeightMap } from "./mega-indicator";
 import { type CustomIndicatorDef } from "./custom-indicators";
 import { hashOverrides } from "./mega-overrides";
+
+/**
+ * Version of the series definition behind the cached points. Bump it whenever
+ * the specs that are scored, or an estimator's construction, changes — a cache
+ * key without it would keep serving points computed by the old engine.
+ */
+export const HISTORY_ENGINE_VERSION = 2; // 2: kernel legs scored from a trailing window
 
 export interface HistoryPoint {
   date: string;
@@ -77,8 +85,11 @@ export async function getMegaHistory(
   // Sub-year windows (1M ≈ 0.08y, 6M = 0.5y) must be part of the cache key,
   // otherwise the 1M chart would be served the cached 3Y series trimmed client-side.
   // Per-indicator edits belong in the key too: an edited formula changes every
-  // point, so serving the pre-edit series would be wrong, not just stale.
-  const wHash = `${hashWeights(weights)}:${years}:${hashCustom(custom)}:${hashOverrides(overrides)}`;
+  // point, so serving the pre-edit series would be wrong, not just stale — and so
+  // does the ENGINE version: when the set of scored specs or an estimator changes
+  // (as it did when the kernel pair joined the series), every stored point is
+  // describing a composite that no longer exists. Bump this when it does.
+  const wHash = `${HISTORY_ENGINE_VERSION}:${hashWeights(weights)}:${years}:${hashCustom(custom)}:${hashOverrides(overrides)}`;
   const warnings: string[] = [];
   // Names for the legend: built-ins + any custom indicators that compute.
   const nameMap = (): Record<string, string> => {

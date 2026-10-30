@@ -17,20 +17,28 @@ leaves your machine.
 - **Live Quotes** — real-time prices (Yahoo Finance with Stooq fallback), day change,
   and total return computed on every load.
 - **Allocation** — visual portfolio allocation donut including cash.
+- **Market Circle** — the same equity grouped into **asset classes** you assign
+  (Stocks, ETFs, Crypto, Bonds, Real estate, Commodities, Other) or **markets** from
+  each live quote's currency, with cash included and the total in the middle.
+  An untouched symbol stays **Unclassified** — nothing is inferred from a ticker.
 
 ### Analysis
 - **Mega Indicator** — one composite 0–100 technical health score per ticker, blending
   trend (50/200 SMA), RSI, MACD, Bollinger position, ATR%, momentum, volume ratio,
-  52-week-high/low distance, Kaufman Efficiency Ratio, and Nadaraya-Watson kernel
-  regression (slope + residual), plus the full SMA/EMA 10–200 family and the
-  Connors RSI / Coppock / PMO / DPO / Ease of Movement / ATR-stop catalogue.
-  The default composite is **research-weighted to 93.5 points** (RSI and Bollinger
-  20 each, MACD 10, the SMA/EMA family 0.5 each …); every indicator still has an
-  adjustable weight and presets (Balanced / Everything / Trend / Momentum / Mean
-  Reversion / Smooth Trends). The score drives a baseline decision shown beside
-  the gauge — **Buy ≥ 70 · Hold 25–70 · Sell < 25** — and score-over-time
-  history is computed with trailing windows only (no look-ahead) and cached in
-  SQLite.
+  52-week-high/low distance and Kaufman Efficiency Ratio, plus the full SMA/EMA
+  10–200 family. The catalogue adds the Connors RSI / Coppock / PMO / DPO / Ease of
+  Movement / ATR-stop readings **and** the Nadaraya-Watson kernel pair (slope +
+  residual) — the kernel legs are computed from a trailing window, so adding one still
+  produces a score the history and the backtests can reproduce.
+  The default composite is **research-weighted, 88.5 points in total** (RSI and
+  Bollinger 20 each, MACD 10, the SMA/EMA family 0.5 each …); every indicator has an
+  adjustable weight, its formula and its fields are editable in place, and presets
+  cover Balanced / Everything / Trend / Momentum / Mean Reversion / Smooth Trends.
+  The score drives a baseline decision shown beside the gauge —
+  **Buy ≥ 70 · Hold 25–70 · Sell < 25** — with its own percentile in the ticker's
+  history, where each band sits in that history, what moved since the previous
+  session, and what followed readings in the same decile. Score-over-time history is
+  computed with trailing windows only (no look-ahead) and cached in SQLite.
 - **Watchlist** — track ideas with live quotes and target-price alerts that show how
   far price is from your entry point.
 - **Indicators engine** — SMA, EMA, RSI, MACD, Bollinger Bands, ATR, Connors RSI,
@@ -61,6 +69,41 @@ leaves your machine.
   strategy that trades the app's own composite indicator, and **Mega Score Fast**
   (score velocity + ATR trailing stop), the opt-in higher-frequency variant
   (`src/lib/strategies.ts`).
+- **Entry filters, measured and off by default** — the Mega Score strategy can require
+  the buy band to hold for N days (`confirm`) and/or the close to sit above its own
+  trailing SMA (`trendMa`). Measured Oct 2026 on 26 tickers × 20 years (`npm run
+  test:filters`): they cut the *number* of losers mostly by trading less (at 55/45,
+  1,333 → 839 trades and 777 → 469 losers) but not the loss rate reliably (58.3 % →
+  55.9 %), and trend-200 was worse on the last-30 % window with Sharpe 0.57 → 0.54.
+  They stay off; turn them on when you prefer fewer, larger trades.
+- **Measured risk-exit warning** — setting a stop-loss on the Mega Score rule now shows
+  a warning in the form: at 70/25 a 15 % stop turned 5 decisions into 129 trades with
+  126 losses, because the engine re-buys while the regime is still long. On the volatile
+  names, losers were indistinguishable from winners at entry (average reading 67.7 vs
+  68.7) and were held ~31 days against ~135 for winners — the losses are whipsaws, not
+  bad entry readings, which is why filters and stops do not remove them.
+- **Trained map vs the losses** — training the same cache at 70 %, and with the
+  indicator catalogue at 60/70/80 % (`npm run test:trained`), never cleared the trainer's
+  excess-Sharpe luck bar (best held-out excess −0.11). Rank separation between winners'
+  and losers' entry readings stayed at chance (AUC 0.43–0.60, no stable sign) even for
+  the map with the lowest loss rate: catalogue-80 cut the loss rate to 51.5 % while its
+  separation was 0.445, i.e. worse than a coin flip. The shipped weights stay until a
+  map clears the excess-Sharpe gate.
+- **Separation shown before applying** — the Training tab now reports, above the Apply
+  button, whether a trained map tells winners from losers on the held-out window: mean
+  entry reading of each group, the gap, and AUC (0.5 = no separation), for the prior and
+  the trained map at the same bands. A lower loss rate with AUC at chance is labelled as
+  different exposure, not better entries.
+- **Per-ticker separation, and a cold hold-out** — the card expands to a per-symbol table
+  (worst AUC first) so a name the map misreads is visible. On the 26 cached tickers at the
+  last 20 %, only GME, GOOGL, QQQ and WMT cleared AUC 0.55 under every map, and training
+  with a volatile name removed entirely did not help it: the trained map beat the prior's
+  excess Sharpe on 3 of 8 held-out names (`npm run test:leaveout`).
+- **Loss profile** — every run breaks the rule's exits down for you: how many lost, the
+  average win vs average loss, the worst trade, how long losers were held, the average
+  entry score of losers vs winners, and the winner/loser split per exit reason
+  (signal, stop-loss, take-profit, trailing-stop). End-of-test closes are excluded and
+  a sample under 10 trades is labelled as indicative rather than evidence.
 - **Mega Score weights & base score** — the Mega Score strategy (and its price-chart
   overlay) can use the weights you tuned on the Mega Indicator page; Compare/Optimize/
   Walk-Forward apply them too. Its buy/sell score levels are editable in the backtest
@@ -100,6 +143,27 @@ leaves your machine.
   0-100 score, the weight it carried and the points it added to the composite, biggest
   contributor first. Recomputed on demand from the same weights and edits the run
   traded, so a log row and the page agree.
+- **Export the whole run to Excel** — one workbook with **Summary** (what was run, on
+  which data, with which weights/edits and every metric), **Bars** (one row per day:
+  open/high/low/close, change vs open and vs the previous close, volume, Mega Score
+  raw and smoothed, the buy/hold/exit zone, in-market, the trade action, equity,
+  benchmark and drawdown), **Indicator scores** and **Indicator raw** (one column per
+  indicator, 0-100 and in its own units), **Indicator catalogue** (id, unit, weight,
+  formula), plus **Trades**, **Equity** and **Monthly returns**. A warm-up reading is
+  a blank cell, never 0; every value is a number, so Excel can sum and chart it
+  (`src/lib/backtest-export.ts`).
+- **Export the full price history with every indicator** — the Mega Indicator page's
+  **⬇ Export all days + indicators** button writes one workbook for the ticker in the
+  search box: **Daily prices** (one row per trading session: open/high/low/close,
+  change vs open and vs the previous close, volume, dollar volume, intraday range,
+  52-week high/low and the distance to each, Mega Score), **Indicator scores** and
+  **Indicator raw** (one column per computed indicator, 0-100 and in its own units),
+  **Indicator catalogue** (id, unit, thresholds, weight, formula), **Indicator
+  coverage** (readings, leading warm-up bars, first/last day each indicator could
+  answer) and **Summary** (source, span, weights, edits). Every trading day the
+  source returns is exported — weekends and holidays simply have no bar, and a
+  blank cell is a warm-up, never 0. API: `GET /api/export/prices?symbol=AAPL&years=30`
+  (`src/lib/price-export.ts`).
 - **Strategy comparison** — run every strategy against the same ticker and rank them.
 - **Parameter optimization** — sweep strategy parameters over a grid heatmap.
 - **Frequency is a dial, not a win** — measured on 24 tickers × 15 years at 2 bps
@@ -110,6 +174,25 @@ leaves your machine.
 - **Walk-forward optimization** — repeatedly optimize on a rolling training window
   and verify on the unseen data after it; stitched out-of-sample equity curve and
   per-fold overfit flags expose parameter sets that only memorized the past.
+
+### Where the exit and the smoothing sit (measured)
+
+The Mega Score rule smooths the composite before its bands read it, and the exit
+band decides when it sells. Both were swept in Oct 2026 (`npm run test:exit`, 26
+cached tickers, 2 bps each way, full history plus both held-out tails):
+
+| Smoothing (days) | 1 | 3 | **5 (shipped)** | 10 | 20 |
+|---|---|---|---|---|---|
+| Sharpe, last 40 % / last 30 % at exit 25 | 0.75 / 0.74 | 0.75 / 0.77 | **0.76 / 0.78** | 0.73 / 0.74 | 0.72 / 0.73 |
+
+A faster window trades far more (88 trades vs 5 on the full history) and scores
+lower. Every exit above 25 measured worse on both tails (30 → 0.74 / 0.75,
+35 → 0.71 / 0.71, 40 → 0.67 / 0.66, 45 → 0.61 / 0.58, 50 → 0.60 / 0.55), so the
+defaults stay **5 days and 70 / 25**. Two things were fixed instead: both mega
+strategies now log the same smoothed reading they trade (the fast one used to log
+the raw score), and a run warns when the exit band was never reached — with 10+
+days of smoothing the 25 band can become unreachable, and the rule is then buy &
+hold with an unused guardrail.
 
 ### Which frequency to trade (daily / weekly / monthly)
 
@@ -371,6 +454,11 @@ Re-run the tab on your own universe before trusting any number here.
 - **Import** — drag & drop broker exports: Excel (.xlsx/.xls), CSV, or PDF statements.
   Columns are auto-detected (symbol, shares, price, side, fees), duplicates skipped.
 - **Export** — CSV export for holdings and trade log.
+- **Export graphs** — every chart (line, area, bar, scatter, and the circular
+  allocation donut) has a **PNG** button in its corner; the file is 2× the
+  on-screen size with the current theme's background.
+- **Export logs** — Settings → **Logs** lists runtime errors/warnings and downloads
+  them as CSV (spreadsheet) or JSON (stack traces and URLs included).
 - **Backup / Restore** — one-click JSON export/import of the whole database.
 
 ### App

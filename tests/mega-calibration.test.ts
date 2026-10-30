@@ -23,6 +23,7 @@ import {
   type CalibrationBar,
   type CalibrationFrame,
 } from "../src/lib/mega-calibration";
+import { computeMegaScoreSeries } from "../src/lib/mega-score";
 
 /** Deterministic pseudo-random generator (no Math.random in tests). */
 function rng(seed: number) {
@@ -248,7 +249,31 @@ describe("prepareFrame", () => {
     const bars = makeBars(400);
     const frame = prepareFrame("TEST", bars);
     expect(frame.ids.length).toBeGreaterThan(20);
-    expect(frame.ids).not.toContain("ta-kernel-slope"); // centred filter — excluded
+    // The kernel legs ARE trainable now: the engine computes them with a trailing
+    // window (ta.kernelTrend), so a backtest can reproduce the live reading. What
+    // matters is that they are causal — pinned by the truncation check below.
+    expect(frame.ids).toContain("ta-kernel-slope");
+    const cut = 300;
+    const truncated = computeMegaScoreSeries({
+      high: bars.slice(0, cut + 1).map((b) => b.high),
+      low: bars.slice(0, cut + 1).map((b) => b.low),
+      close: bars.slice(0, cut + 1).map((b) => b.close),
+      volume: bars.slice(0, cut + 1).map((b) => b.volume),
+      open: bars.slice(0, cut + 1).map((b) => b.open),
+    });
+    const full = computeMegaScoreSeries({
+      high: bars.map((b) => b.high),
+      low: bars.map((b) => b.low),
+      close: bars.map((b) => b.close),
+      volume: bars.map((b) => b.volume),
+      open: bars.map((b) => b.open),
+    });
+    for (const id of ["ta-kernel-slope", "ta-kernel-residual"]) {
+      const before = full.indicators[id][cut];
+      const after = truncated.indicators[id][cut];
+      expect(Number.isFinite(after), `${id} has no reading at the cut`).toBe(true);
+      expect(after, `${id} changed when the future was cut — it looks ahead`).toBeCloseTo(before, 10);
+    }
     const rsi = frame.scores["ta-rsi-14"];
     expect(rsi.length).toBe(400);
     expect(Number.isNaN(rsi[3])).toBe(true); // warm-up

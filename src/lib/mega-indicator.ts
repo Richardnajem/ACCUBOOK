@@ -125,12 +125,6 @@ export const TECHNICAL_SPECS: IndicatorSpec[] = [
   T("ta-er-10", "Efficiency Ratio (Kaufman, 10)", "", "higher", [0.15, 0.45],
     "Kaufman Efficiency Ratio: net move / total path over 10 bars. High = clean trend, low = chop.",
     "ER = |close[t] − close[t−10]| / Σᵢ₌₁..₁₀ |close[t−i+1] − close[t−i]|"),
-  T("ta-kernel-slope", "Kernel Regression Slope", "%/bar", "higher", [-0.05, 0.05],
-    "Slope of the Nadaraya-Watson kernel trend, in % of price per bar. Positive = BUY regime.",
-    "ŷ(t) = Σᵢ wᵢ·close[t+i] / Σᵢ wᵢ with wᵢ = exp(−i²/(2·8²)),  Slope% = (ŷ(t) − ŷ(t−1))/ŷ(t−1) · 100"),
-  T("ta-kernel-residual", "Kernel Residual", "%", "band", [0.5, 3],
-    "Typical deviation of price from the kernel trend line. Low = smooth trend, high = choppy/unsafe.",
-    "Residual% = stdev(close − ŷ, 20 bars) / |ŷ| · 100"),
 ];
 
 // SMA/EMA family (SMA/EMA 10-200 with BUY/SELL signals). Scored as
@@ -168,6 +162,21 @@ const O = (
 });
 
 export const OPTIONAL_SPECS: IndicatorSpec[] = [
+  // ─── The kernel pair: available, but NOT in the balanced default ────────
+  // They used to carry 3 + 2 of the default weight while the score history and
+  // every backtest excluded them, so the number on the Mega Indicator page was a
+  // composite nobody had measured (up to ±2 points away from the one the 70/25
+  // bands were fitted on). They are now catalogue indicators: weight 0 until you
+  // add one, and both the live reading and the series come from the same
+  // trailing-window estimator (ta.kernelTrend), so adding one keeps the page, the
+  // history and a backtest in step.
+  O("ta-kernel-slope", "Kernel Regression Slope", "Technical", "%/bar", "higher", [-0.05, 0.05],
+    "Slope of the Nadaraya-Watson kernel trend, in % of price per bar. Positive = BUY regime. Computed from a trailing window (the kernel sits 8 bars back), which is what lets the score history and backtests reproduce this reading exactly.",
+    "ŷ(t) = Σᵢ wᵢ·close[t+i] / Σᵢ wᵢ with wᵢ = exp(−i²/(2·8²)), i ∈ [−16, 0] (trailing);  Slope% = (ŷ(t) − ŷ(t−1))/ŷ(t−1) · 100"),
+  O("ta-kernel-residual", "Kernel Residual", "Technical", "%", "band", [0.5, 3],
+    "Typical deviation of price from the kernel trend line. Low = smooth trend, high = choppy/unsafe. Same trailing window as the slope, so it is backtestable.",
+    "Residual% = stdev(close − ŷ, last 20 bars) / |ŷ(t)| · 100, ŷ from the trailing window above"),
+
   O("ta-adx-14", "ADX (14)", "Trend", "", "higher", [20, 40],
     "Trend strength, not direction. Under 20 the market is choppy, over 40 it is trending hard. Pair it with +DI/−DI from the same calculation to see which side is winning.",
     "TR = max(H−L, |H−close₁|, |L−close₁|);  +DM = (H−H₁ > L₁−L and H−H₁ > 0) ? H−H₁ : 0 (mirrored for −DM);  +DI = 100·S(+DM)/S(TR), −DI likewise, S = Wilder smoothing;  DX = 100·|+DI − −DI|/(+DI + −DI);  ADX = S(DX)"),
@@ -600,13 +609,18 @@ export interface MegaInput {
  *   • RSI(14) and the Bollinger position carry 20 each — the two mean-reversion
  *     / momentum readings with the most independent signal.
  *   • MACD histogram 10: the other genuinely orthogonal momentum measure.
- *   • Momentum, stochastic, ATR, volume, 52-week distance, efficiency ratio and
- *     the kernel pair share the rest — the context a single oscillator lacks.
+ *   • Momentum, stochastic, ATR, volume, 52-week distance and the efficiency
+ *     ratio share the rest — the context a single oscillator lacks.
  *   • The SMA/EMA family shares 8 points (0.5 each): sixteen correlated
  *     price-vs-average readings should not dominate the blend.
  *
  * The catalogue still starts at 0: an indicator joins the composite only when
- * the user (or a suggestion they accepted) adds it.
+ * the user (or a suggestion they accepted) adds it. **That includes the kernel
+ * pair** (slope + residual): they are catalogue entries now, because every
+ * number below was measured on the composite WITHOUT them — the live page used
+ * to add 3 + 2 points of centred-kernel signal the history and the backtest
+ * could not reproduce (`lib/ta.ts` `kernelTrend` gives them a causal estimator
+ * if you do add them).
  *
  * Calibrated Oct 2026 (`tests/mega-calibration-live.test.ts`, 16 tickers × 15y,
  * 2 bps commission + 2 bps slippage, chronological 60/40 · 70/30 · 80/20 splits):
@@ -616,7 +630,8 @@ export interface MegaInput {
  * CCI 3 → 1, ATR 4 → 3, 3-day volatility 1 → 0.5, which improved excess Sharpe
  * on all three splits (+0.04, +0.05, +0.09). Re-verify with the Training tab —
  * do not edit these numbers from memory. Only the SHARES matter: the map totals
- * 93.5, and the composite divides by the weight it actually summed.
+ * 88.5 (93.5 with the two kernel legs switched back on), and the composite
+ * divides by the weight it actually summed.
  *
  * Re-derived Oct 2026 on the 24-ticker universe (the 16 above plus TSLA, AMD,
  * NFLX, MU, FSLR, GME, MSTR, SMCI — 47-99% annualized vol each), same costs and
@@ -655,8 +670,9 @@ export const DEFAULT_WEIGHTS: Readonly<Record<string, number>> = {
   "ta-vol-ratio": 2,
   "ta-dist-52w-high": 3,
   "ta-er-10": 3,
-  "ta-kernel-slope": 3,
-  "ta-kernel-residual": 2,
+  // The two kernel legs are deliberately absent: they are catalogue indicators
+  // now (weight 0 until added), because this map and MEGA_BASELINE were measured
+  // on the composite WITHOUT them. See OPTIONAL_SPECS.
   // The SMA/EMA family (16 specs) shares 8 points.
   ...Object.fromEntries(
     MA_PERIODS.flatMap((p) => [[`ta-sma-${p}`, 0.5], [`ta-ema-${p}`, 0.5]])

@@ -1195,3 +1195,72 @@ export function atrStop(
   }
   return { line, direction };
 }
+
+/**
+ * Nadaraya-Watson kernel trend with a TRAILING window only, plus the slope and
+ * residual the Mega Indicator scores.
+ *
+ * A centred kernel estimate (the usual `Σ wᵢ·close[t+i]`) is a nicer smoother but
+ * reads bars after t, so a series built from it cannot be backtested, and the
+ * value a live page shows would differ from the value any history or backtest
+ * contains. This estimator deliberately uses the same trailing window that the
+ * live reading needs — weights `exp(−d²/2bw²)` over `d ∈ [−2·bw, 0]`, i.e. a
+ * kernel centred `bw` bars back — so the live value is the last value of the
+ * same series. Output is NaN during the `2·bw` warm-up.
+ *
+ *   trend    — the kernel line itself
+ *   slope    — (trend[t] − trend[t−1]) / trend[t−1] · 100, % of price per bar
+ *   residual — stdev(close − trend, last 20 bars) / |trend[t]| · 100, choppiness
+ */
+export function kernelTrend(
+  closes: number[],
+  bw = 8,
+): { trend: number[]; slope: number[]; residual: number[] } {
+  const n = closes.length;
+  const trend = new Array(n).fill(NaN);
+  const slope = new Array(n).fill(NaN);
+  const residual = new Array(n).fill(NaN);
+  const span = bw * 2;
+  // Weights for the trailing window, centred `bw` bars back.
+  const w: number[] = [];
+  for (let d = -span; d <= 0; d++) w.push(Math.exp(-(d * d) / (2 * bw * bw)));
+
+  for (let i = span; i < n; i++) {
+    let ws = 0;
+    let vs = 0;
+    let ok = true;
+    for (let d = -span; d <= 0; d++) {
+      const c = closes[i + d];
+      if (!Number.isFinite(c)) { ok = false; break; }
+      const wt = w[d + span];
+      ws += wt;
+      vs += wt * c;
+    }
+    if (ok && ws !== 0) trend[i] = vs / ws;
+  }
+
+  for (let i = 1; i < n; i++) {
+    const now = trend[i];
+    const prev = trend[i - 1];
+    if (Number.isFinite(now) && Number.isFinite(prev) && prev !== 0) {
+      slope[i] = ((now - prev) / prev) * 100;
+    }
+  }
+
+  // Residual over the last 20 bars that have a trend value — the same window the
+  // live reading uses, so the two agree bar for bar.
+  for (let i = 19; i < n; i++) {
+    const est = trend[i];
+    if (!Number.isFinite(est) || est === 0) continue;
+    const diffs: number[] = [];
+    for (let j = Math.max(0, i - 19); j <= i; j++) {
+      if (Number.isFinite(trend[j]) && Number.isFinite(closes[j])) diffs.push(closes[j] - trend[j]);
+    }
+    if (diffs.length < 5) continue;
+    const mean = diffs.reduce((s, v) => s + v, 0) / diffs.length;
+    const variance = diffs.reduce((s, v) => s + (v - mean) ** 2, 0) / diffs.length;
+    residual[i] = (Math.sqrt(variance) / Math.abs(est)) * 100;
+  }
+
+  return { trend, slope, residual };
+}

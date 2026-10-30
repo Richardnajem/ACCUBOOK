@@ -210,6 +210,27 @@ export default function TrainingLab({
   const beatsPrior = tuned && prior ? tuned.test.meanSharpe > prior.test.meanSharpe : false;
   const improved = tuned && prior ? tuned.train.meanSharpe > prior.train.meanSharpe : false;
 
+  // Does the trained map tell winners from losers? A lower loss rate with AUC at
+  // chance means the map changed WHICH trades happen, not which ones win.
+  const sepTuned = result?.separation?.tuned;
+  const sepVerdict = (() => {
+    if (!sepTuned || sepTuned.trades === 0) {
+      return "No completed trades on the held-out window — separation cannot be judged.";
+    }
+    if (sepTuned.auc === null) {
+      return "Only winners or only losers in the held-out window — separation cannot be judged.";
+    }
+    const auc = sepTuned.auc;
+    const gap = sepTuned.gap ?? 0;
+    if (auc >= 0.55) {
+      return `Separates losers: winners' entry readings average ${gap >= 0 ? "+" : ""}${gap.toFixed(2)} points vs losers (AUC ${auc.toFixed(3)}).`;
+    }
+    if (auc <= 0.45) {
+      return `Inverted: losers scored HIGHER at entry than winners (AUC ${auc.toFixed(3)}) — worse than a coin flip at identifying losers.`;
+    }
+    return `No separation: AUC ${auc.toFixed(3)} is a coin flip, so a lower loss rate here comes from different exposure, not better entries.`;
+  })();
+
   return (
     <div className="space-y-6">
       {/* ── Controls ─────────────────────────────────────────── */}
@@ -383,6 +404,117 @@ export default function TrainingLab({
               {kpi("Search trials", String(result.trials),
                 `luck bar ≈ ${result.luckExcessSharpe.toFixed(2)} excess Sharpe`, "neutral")}
             </div>
+
+            {/* Loser separation — shown before Apply, because a lower loss rate is
+                not evidence the map can pick entries. */}
+            <div className="mt-4 rounded-lg border border-[var(--card-border)] p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p className="text-xs font-semibold">Entry-reading separation (winners vs losers)</p>
+                <p className="text-[10px] text-[var(--muted)]">
+                  held-out window · {result.tuned.entry}/{result.tuned.exit} bands · AUC 0.5 = no separation
+                </p>
+              </div>
+              <div className="overflow-x-auto mt-2">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[var(--muted)]">
+                      <th className="text-left py-1 font-medium">Map</th>
+                      <th className="text-right py-1 font-medium">Trades</th>
+                      <th className="text-right py-1 font-medium">Loss rate</th>
+                      <th className="text-right py-1 font-medium">Entry winners</th>
+                      <th className="text-right py-1 font-medium">Entry losers</th>
+                      <th className="text-right py-1 font-medium">Gap</th>
+                      <th className="text-right py-1 font-medium">AUC</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(["prior", "tuned"] as const).map((key) => {
+                      const s = result.separation[key];
+                      const auc = s.auc;
+                      return (
+                        <tr key={key} className="border-t border-[var(--card-border)]">
+                          <td className="py-1">{key === "prior" ? "Prior (shipped)" : "Trained"}</td>
+                          <td className="py-1 text-right tabular-nums">{s.trades}</td>
+                          <td className={`py-1 text-right tabular-nums ${s.lossRatePct > 55 ? "text-[var(--danger)]" : ""}`}>
+                            {pct(s.lossRatePct)}
+                          </td>
+                          <td className="py-1 text-right tabular-nums">{s.meanEntryWinners?.toFixed(1) ?? "—"}</td>
+                          <td className="py-1 text-right tabular-nums">{s.meanEntryLosers?.toFixed(1) ?? "—"}</td>
+                          <td className={`py-1 text-right tabular-nums ${(s.gap ?? 0) > 0 ? "text-[var(--success)]" : (s.gap ?? 0) < 0 ? "text-[var(--danger)]" : ""}`}>
+                            {s.gap === null ? "—" : `${s.gap >= 0 ? "+" : ""}${s.gap.toFixed(2)}`}
+                          </td>
+                          <td className={`py-1 text-right tabular-nums font-semibold ${auc === null ? "" : auc >= 0.55 ? "text-[var(--success)]" : auc <= 0.45 ? "text-[var(--danger)]" : "text-[var(--muted)]"}`}>
+                            {auc === null ? "—" : auc.toFixed(3)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+                {sepVerdict}
+                {sepTuned && sepTuned.trades > 0 && sepTuned.trades < 20
+                  ? ` Sample is small (${sepTuned.trades} completed trades) — read it as indicative.`
+                  : ""}
+              </p>
+            </div>
+
+            {/* Which tickers the map misreads — worst AUC first, so the list
+                opens on the names where the reading is backwards. */}
+            {(result.separation.perSymbol?.length ?? 0) > 0 && (
+              <details className="mt-3 rounded-lg border border-[var(--card-border)] p-3">
+                <summary className="cursor-pointer text-xs font-semibold">
+                  Per-symbol detail — {result.separation.perSymbol?.length ?? 0} tickers, worst separation first
+                </summary>
+                <div className="overflow-x-auto mt-2">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-[var(--muted)]">
+                        <th className="text-left py-1 font-medium">Ticker</th>
+                        <th className="text-right py-1 font-medium">Trades</th>
+                        <th className="text-right py-1 font-medium">Loss rate</th>
+                        <th className="text-right py-1 font-medium">Entry winners</th>
+                        <th className="text-right py-1 font-medium">Entry losers</th>
+                        <th className="text-right py-1 font-medium">Gap</th>
+                        <th className="text-right py-1 font-medium">AUC</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(result.separation.perSymbol ?? []).map((s) => (
+                        <tr key={s.symbol} className="border-t border-[var(--card-border)]">
+                          <td className="py-1 font-medium">{s.symbol}</td>
+                          <td className="py-1 text-right tabular-nums">{s.trades}</td>
+                          <td className="py-1 text-right tabular-nums">{pct(s.lossRatePct)}</td>
+                          <td className="py-1 text-right tabular-nums">{s.meanEntryWinners?.toFixed(1) ?? "—"}</td>
+                          <td className="py-1 text-right tabular-nums">{s.meanEntryLosers?.toFixed(1) ?? "—"}</td>
+                          <td className="py-1 text-right tabular-nums">
+                            {s.gap === null ? "—" : `${s.gap >= 0 ? "+" : ""}${s.gap.toFixed(2)}`}
+                          </td>
+                          <td
+                            className={`py-1 text-right tabular-nums font-semibold ${
+                              s.auc === null
+                                ? "text-[var(--muted)]"
+                                : s.auc >= 0.55
+                                  ? "text-[var(--success)]"
+                                  : s.auc <= 0.45
+                                    ? "text-[var(--danger)]"
+                                    : ""
+                            }`}
+                          >
+                            {s.auc === null ? "—" : s.auc.toFixed(3)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-2 text-[10px] text-[var(--muted)] leading-relaxed">
+                  AUC below 0.5 means this ticker&apos;s losers entered on higher readings than its
+                  winners. Tickers with fewer than 5 completed trades are noise, not a verdict.
+                </p>
+              </details>
+            )}
 
             <p className="mt-3 text-[11px] text-[var(--muted)] leading-relaxed">
               Objective: {result.objective}. Train window: {result.trainYears} years. Score percentiles on the test

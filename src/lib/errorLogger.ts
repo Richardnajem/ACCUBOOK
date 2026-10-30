@@ -55,11 +55,21 @@ function load(): void {
     }
 }
 
+export const ERROR_LOG_EVENT = 'stockfolio:error-log';
+
 function save(): void {
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(-MAX_ENTRIES)));
     } catch {
         // Never let logging break the app.
+    }
+    // Let the Logs panel in Settings refresh itself while it is open.
+    if (typeof window !== 'undefined') {
+        try {
+            window.dispatchEvent(new Event(ERROR_LOG_EVENT));
+        } catch {
+            // Older/odd environments without Event — the log itself is stored.
+        }
     }
 }
 

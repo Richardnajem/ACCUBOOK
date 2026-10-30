@@ -9,6 +9,7 @@ import type { EnrichedPortfolio } from "@/lib/portfolio";
 import { PanelBoard, ChartPanel } from "@/components/PanelBoard";
 import DetailDrawer, { DetailSection, toneOf } from "@/components/DetailDrawer";
 import SymbolDetail, { SymbolMeta } from "@/components/SymbolDetail";
+import { MarketCircle } from "@/components/MarketCircle";
 
 const fmt = (n: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
@@ -91,6 +92,16 @@ export default function DashboardPage() {
         ? [{ name: "Cash", value: portfolio.snapshot.cashBalance, color: "#64748b" }]
         : [],
     );
+
+  // Market Circle: one row per open position plus the quote's real currency, so
+  // the "Market" grouping reads a feed value instead of inferring one.
+  const circleRows = positions
+    .filter((p) => p.marketValue > 0)
+    .map((p) => ({
+      symbol: p.symbol,
+      marketValue: p.marketValue,
+      currency: portfolio?.quotes[p.symbol]?.currency ?? null,
+    }));
 
   // Everything the symbol drawer needs, from data this page already holds.
   const metaOfPosition = (p: PortfolioData["quoted"][number]): SymbolMeta => ({
@@ -217,7 +228,7 @@ export default function DashboardPage() {
 
           <PanelBoard
             boardKey="dashboard"
-            ids={["holdings", "allocation", "movers", "watchlist", "activity"]}
+            ids={["holdings", "allocation", "movers", "watchlist", "market-circle", "activity"]}
             className="grid grid-cols-1 xl:grid-cols-6 gap-6"
           >
             {/* Holdings snapshot */}
@@ -351,6 +362,13 @@ export default function DashboardPage() {
                 </div>
               )}
             </ChartPanel>
+
+            {/* Market circle — asset class / market grouping of the same equity */}
+            <MarketCircle
+              rows={circleRows}
+              cashBalance={portfolio?.snapshot.cashBalance ?? 0}
+              className="xl:col-span-6"
+            />
 
             {/* Recent trades */}
             <ChartPanel

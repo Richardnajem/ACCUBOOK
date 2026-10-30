@@ -223,6 +223,11 @@ function compositeFrom(state: BlendState): number[] {
   return out;
 }
 
+/** The blended 0-100 composite for one map, one reading per bar. */
+export function compositeSeries(frame: CalibrationFrame, weights: WeightMap): number[] {
+  return compositeFrom(blendState(frame, weights));
+}
+
 /** Rescale a weight map so its positive weights sum to `total` (100 by default). */
 export function normalizeWeights(weights: WeightMap, total = 100): WeightMap {
   const sum = Object.values(weights).reduce((s, v) => s + (Number.isFinite(v) && v > 0 ? v : 0), 0);
@@ -457,6 +462,129 @@ export function simulateRegime(
     benchmarkSharpe: bench.sharpe,
     benchmarkMaxDrawdownPct: bench.maxDrawdownPct,
     benchmarkTotalReturnPct: bench.totalReturnPct,
+  };
+}
+
+// ─── Entry-reading separation ──────────────────────────────────
+//
+// A trained map can post a lower loss rate just by trading a different set of
+// names and days. The question this answers is narrower: does the composite
+// reading that OPENS a trade say anything about whether that trade wins? Every
+// completed round trip is tagged with the reading on its signal bar, then the
+// winners' and losers' readings are compared by mean gap and by AUC (chance a
+// random winner's reading beats a random loser's). AUC 0.5 = no information.
+
+export interface EntryOutcome {
+  /** Composite reading on the signal bar that opened the trade. */
+  score: number;
+  /** Bars held, fill bar to exit fill bar. */
+  bars: number;
+  /** Net return of the completed round trip, %. */
+  returnPct: number;
+}
+
+export interface EntrySeparation {
+  trades: number;
+  losers: number;
+  lossRatePct: number;
+  meanEntryWinners: number | null;
+  meanEntryLosers: number | null;
+  /** winners − losers, in score points. Positive = the reading favours winners. */
+  gap: number | null;
+  /** P(random winner's entry reading > random loser's). 0.5 = no separation. */
+  auc: number | null;
+  meanBarsWinners: number | null;
+  meanBarsLosers: number | null;
+}
+
+/**
+ * Replay the regime rule on a composite and record the reading that opened each
+ * COMPLETED trade. A trade still open when the window ends is skipped: the
+ * harness would close it at a price no signal asked for, so its outcome says
+ * nothing about the entry reading. Fill model matches `simulateRegime`.
+ */
+export function collectEntryOutcomes(
+  scores: number[],
+  frame: Pick<CalibrationFrame, "open" | "close">,
+  entry: number,
+  exit: number,
+  opts: { window?: RegimeWindow; costs?: RegimeCosts } = {}
+): { wins: EntryOutcome[]; losses: EntryOutcome[] } {
+  const from = Math.max(0, opts.window?.from ?? 0);
+  const to = Math.min(opts.window?.to ?? scores.length, scores.length);
+  const comm = Math.max(0, opts.costs?.commissionBps ?? 0) / 10000;
+  const slip = Math.max(0, opts.costs?.slippageBps ?? 0) / 10000;
+  const wins: EntryOutcome[] = [];
+  const losses: EntryOutcome[] = [];
+
+  let held = false;
+  let pending = false;
+  let entryScore = Number.NaN;
+  let entryBar = 0;
+  let shares = 0;
+
+  for (let i = from; i < to; i++) {
+    if (i > from) {
+      if (pending && !held) {
+        const px = frame.open[i] * (1 + slip);
+        if (Number.isFinite(px) && px > 0) {
+          const sh = 1 / (px * (1 + comm));
+          if (Number.isFinite(sh) && sh > 0) {
+            shares = sh;
+            held = true;
+            entryBar = i;
+          }
+        }
+      } else if (!pending && held) {
+        const cash = shares * frame.open[i] * (1 - slip) * (1 - comm);
+        const outcome: EntryOutcome = { score: entryScore, bars: i - entryBar, returnPct: (cash - 1) * 100 };
+        (outcome.returnPct > 0 ? wins : losses).push(outcome);
+        held = false;
+        shares = 0;
+      }
+    }
+
+    const s = scores[i];
+    if (Number.isFinite(s)) {
+      if (held) {
+        pending = s >= exit;
+      } else {
+        pending = s >= entry;
+        // This is the signal bar; the fill lands on the next open.
+        if (pending) entryScore = s;
+      }
+    }
+  }
+
+  // A position still open at `to` is ignored on purpose (see the doc comment).
+  return { wins, losses };
+}
+
+export function summarizeEntrySeparation(wins: EntryOutcome[], losses: EntryOutcome[]): EntrySeparation {
+  const trades = wins.length + losses.length;
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const meanW = mean(wins.map((w) => w.score).filter((v) => Number.isFinite(v)));
+  const meanL = mean(losses.map((l) => l.score).filter((v) => Number.isFinite(v)));
+
+  let auc: number | null = null;
+  if (wins.length > 0 && losses.length > 0) {
+    let score = 0;
+    for (const w of wins) {
+      for (const l of losses) score += w.score > l.score ? 1 : w.score === l.score ? 0.5 : 0;
+    }
+    auc = score / (wins.length * losses.length);
+  }
+
+  return {
+    trades,
+    losers: losses.length,
+    lossRatePct: trades > 0 ? (losses.length / trades) * 100 : 0,
+    meanEntryWinners: meanW,
+    meanEntryLosers: meanL,
+    gap: meanW !== null && meanL !== null ? meanW - meanL : null,
+    auc,
+    meanBarsWinners: mean(wins.map((w) => w.bars)),
+    meanBarsLosers: mean(losses.map((l) => l.bars)),
   };
 }
 
@@ -911,6 +1039,17 @@ export interface CalibrationResult {
   variants: VariantReport[];
   deltas: WeightDelta[];
   distribution: { train: ScoreDistribution; test: ScoreDistribution };
+  /**
+   * Does the entry reading separate winners from losers on the held-out window,
+   * at the bands this run would apply? Prior vs trained isolates the weights.
+   * AUC 0.5 means the reading carries no information about the outcome.
+   */
+  separation: {
+    prior: EntrySeparation;
+    tuned: EntrySeparation;
+    /** The trained map's metric per ticker, worst AUC first (unjudgeable last). */
+    perSymbol: Array<{ symbol: string } & EntrySeparation>;
+  };
   searchUnits: Array<{ key: string; label: string; ids: string[]; prior: number; tuned: number }>;
   warnings: string[];
 }
@@ -1180,6 +1319,37 @@ export function trainMegaWeights(
 
   const tunedComposite = compositeFrom(blendState(longest, tunedNormalized));
 
+  // Entry-reading separation on the HELD-OUT window, at the bands this run
+  // would apply. Prior is measured at the same bands, so the map is the only
+  // variable. This is a warning sign, not a pass mark: a low loss rate with
+  // AUC ≈ 0.5 means the map changed exposure, not its ability to pick entries.
+  const separationFor = (weights: WeightMap) => {
+    const wins: EntryOutcome[] = [];
+    const losses: EntryOutcome[] = [];
+    const perSymbol: Array<{ symbol: string } & EntrySeparation> = [];
+    for (const frame of frames) {
+      const edge = Math.min(split, frame.close.length);
+      const out = collectEntryOutcomes(compositeSeries(frame, weights), frame, entry, exit, {
+        window: { from: edge, to: frame.close.length },
+        costs,
+      });
+      wins.push(...out.wins);
+      losses.push(...out.losses);
+      perSymbol.push({ symbol: frame.symbol, ...summarizeEntrySeparation(out.wins, out.losses) });
+    }
+    // Worst first so a misread ticker is the first thing the tab shows; an
+    // unjudgeable one (one-sided sample) sorts last.
+    perSymbol.sort((a, b) => (a.auc ?? 2) - (b.auc ?? 2));
+    return { pooled: summarizeEntrySeparation(wins, losses), perSymbol };
+  };
+  const priorSeparation = separationFor(prior);
+  const tunedSeparation = separationFor(tunedNormalized);
+  const separation = {
+    prior: priorSeparation.pooled,
+    tuned: tunedSeparation.pooled,
+    perSymbol: tunedSeparation.perSymbol,
+  };
+
   const tunedVariant = variants.find((v) => v.key === "tuned")!;
   const priorVariant = variants.find((v) => v.key === "prior")!;
   if (tunedVariant.test.meanTrades < minTrades) {
@@ -1225,6 +1395,7 @@ export function trainMegaWeights(
     weights: tunedNormalized,
     variants,
     deltas,
+    separation,
     distribution: {
       train: scoreDistribution(tunedComposite, { from: 0, to: split }),
       test: scoreDistribution(tunedComposite.slice(Math.min(split, tunedComposite.length))),

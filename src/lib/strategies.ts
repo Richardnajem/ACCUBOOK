@@ -13,6 +13,13 @@ export interface StrategyParam {
   min?: number;
   max?: number;
   step?: number;
+  /**
+   * false = a research switch the optimizer and walk-forward must NOT sweep.
+   * Without this, a wide default range (e.g. a 0-400 trend SMA) wins the
+   * "widest span" axis pick and quietly replaces the band sweep with a filter
+   * sweep — the optimizer would stop answering the question it was asked.
+   */
+  sweep?: boolean;
 }
 
 export interface StrategyDef {
@@ -222,14 +229,52 @@ const momentumStrategy: StrategyDef = {
  * level".
  *
  * Exported so the boundary itself can be tested, not just real-data behaviour.
+ *
+ * `gates` adds optional, causal entry filters (confirmation window / trend SMA).
+ * Defaults are neutral, so the measured 70/25 rule is unchanged unless a gate
+ * is explicitly turned on; see the measured table above `megaScoreFast` for
+ * whether either gate paid on the cached universe.
  */
-export function megaRegimePosition(smoothed: number[], entry: number, exit: number): number[] {
+export interface RegimeGates {
+  /** Consecutive signal-bar readings at or above the entry band before buying
+   *  (1 = buy on the first crossing, the shipped behaviour). */
+  confirmDays?: number;
+  /** Trailing SMA length the close must be at or above before buying (0 = off). */
+  trendMa?: number;
+  /** Close series aligned to `smoothed`; required for the trend filter. */
+  close?: number[];
+}
+
+export function megaRegimePosition(
+  smoothed: number[],
+  entry: number,
+  exit: number,
+  gates: RegimeGates = {},
+): number[] {
   const pos = new Array(smoothed.length).fill(0);
+  const confirmDays = Math.max(1, Math.round(gates.confirmDays ?? 1));
+  const trendMa = Math.max(0, Math.round(gates.trendMa ?? 0));
+  const close = gates.close && gates.close.length === smoothed.length ? gates.close : null;
+  const trend = trendMa > 0 && close ? sma(close, trendMa) : null;
   let inPos = false;
   for (let i = 0; i < smoothed.length; i++) {
     if (Number.isFinite(smoothed[i])) {
-      if (!inPos && smoothed[i] >= entry) inPos = true;
-      else if (inPos && smoothed[i] < exit) inPos = false;
+      if (!inPos) {
+        // Entry gates look only at the signal bar and earlier. The EXIT is not
+        // gated on purpose — delaying a sell turns a bad entry into a worse one.
+        let ready = smoothed[i] >= entry;
+        for (let k = 1; ready && k < confirmDays; k++) {
+          const prev = smoothed[i - k];
+          if (!Number.isFinite(prev) || prev < entry) ready = false;
+        }
+        if (ready && trend && close) {
+          const level = trend[i];
+          if (!Number.isFinite(level) || close[i] < level) ready = false;
+        }
+        if (ready) inPos = true;
+      } else if (smoothed[i] < exit) {
+        inPos = false;
+      }
     }
     pos[i] = inPos ? 1 : 0;
   }
@@ -246,11 +291,55 @@ const megaScore: StrategyDef = {
     "Exit score = sell strictly below it: the score has to fall under that level before the position is closed, so a reading sitting exactly on it is still held. " +
     "Between the two the strategy holds whatever it already has, and the gap between them is the no-trade band that stops it flipping on noise. " +
     `Defaults are the Mega Indicator baseline (entry ${MEGA_BUY_ABOVE}, exit ${MEGA_SELL_BELOW}); lower bands trade more often, higher bands wait for a stronger reading, and a wider gap means fewer, longer trades. ` +
-    "Entry must stay at or above exit. Signals fill at the next day's open and every input indicator uses trailing windows only (no look-ahead).",
+    "Entry must stay at or above exit. Signals fill at the next day's open and every input indicator uses trailing windows only (no look-ahead). " +
+    "Two optional entry gates are off by default — confirmation days and a trend SMA — because measured they cut the number of losers by trading less, not the loss rate reliably, and cost Sharpe on the held-out tail (see the note above the params)." +
+    " The score is smoothed before the bands read it (default 5 days): measured Oct 2026, 5 was the best of 1/3/5/10/20 on both held-out tails, and 10+ days makes a 25 exit unreachable — the rule then cannot sell at all, which the run warns about.",
+  // MEASURED — Oct 2026, `npm run test:filters`, cached daily bars (26 tickers ×
+  // 20 years), 2 bps commission + 2 bps slippage, full / last-40 % / last-30 %
+  // windows, 5 gate sets × 2 band pairs. The point was losing trades.
+  //
+  //   At the shipped 70/25 the rule makes ~5 decisions across all 26 tickers in
+  //   20 years (1 trade per ticker per 4 years, as documented), so no gate can
+  //   be distinguished there: 5 trades / 3 losers → 4 / 2 with trend-200. That
+  //   is noise, not improvement.
+  //
+  //   At 55/45, where losses are measurable (1,333 trades): loss rate 58.3 %
+  //   baseline, 58.2 % confirm-3, 58.3 % confirm-5, 56.6 % trend-200, 55.9 %
+  //   confirm-3 + trend-200. Losers fell 777 → 469 with both gates, but trade
+  //   count fell 1,333 → 839 and Sharpe 0.57 → 0.54 — fewer losers mainly by
+  //   trading less. On the last-30 % window trend-200 was WORSE (59.7 % losers
+  //   vs 59.4 %, Sharpe 0.44 vs 0.62). Confirm-5 was the mildest: same or lower
+  //   loss rate in both tails (57.1 %) with Sharpe 0.64 on the tail vs 0.62.
+  //
+  // Conclusion: neither gate reduces the loss RATE robustly, so the measured
+  // defaults stay 70/25 with both off. They are exposed so a user who prefers
+  // fewer, larger trades can measure the trade-off on their own tickers.
+  //
+  // MEASURED — Oct 2026, `npm run test:exit`, same 26 tickers and costs, five
+  // smoothing windows (1/3/5/10/20) × seven exits at entry 70 (20-50) plus five
+  // exits at entry 55, on the full history and both held-out tails.
+  //
+  //   Smoothing: at exit 25, last-40 % / last-30 % Sharpe by window was
+  //   0.75/0.74 (1), 0.75/0.77 (3), 0.76/0.78 (5, shipped), 0.73/0.74 (10),
+  //   0.72/0.73 (20). Five days wins on BOTH tails; a faster window trades far
+  //   more (88 trades vs 5 on the full window at smooth 1) and scores lower.
+  //
+  //   Exit: at smooth 5 the tails read 0.76/0.78 at 25, 0.74/0.75 at 30,
+  //   0.71/0.71 at 35, 0.67/0.66 at 40, 0.61/0.58 at 45, 0.60/0.55 at 50 —
+  //   every exit above 25 is worse on both tails, confirming the band sweep.
+  //
+  //   Reachability: at 70/25 the exit fired on ~0.0-0.1 % of sessions, and with
+  //   a 10-day smoothing the score never closed below 25 at all (zero trades).
+  //   A long window can turn the exit into decoration, so the engine now warns
+  //   when a band is never reached instead of reporting a silent buy & hold.
   params: [
     { key: "entry", label: "Entry score (buy ≥)", default: MEGA_BUY_ABOVE, min: 10, max: 90 },
     { key: "exit", label: "Exit score (sell <)", default: MEGA_SELL_BELOW, min: 5, max: 85 },
     { key: "smooth", label: "Score smoothing (days)", default: 5, min: 1, max: 60 },
+    // Both filters are OFF by default: they change measured behaviour, so the
+    // measured 70/25 rule stays the baseline until a sweep says otherwise.
+    { key: "confirm", label: "Entry confirmation (days at/above band, 1 = off)", default: 1, min: 1, max: 20, sweep: false },
+    { key: "trendMa", label: "Trend filter SMA (0 = off)", default: 0, min: 0, max: 400, step: 10, sweep: false },
   ],
   minBars: 210,
   validate: (p) => p.entry >= p.exit,
@@ -260,7 +349,11 @@ const megaScore: StrategyDef = {
     const { score } = computeMegaScoreSeries({ high, low, close, volume, open }, megaWeights, undefined, megaOverrides);
     // Optional smoothing of the composite (trailing SMA — causal).
     const s = params.smooth > 1 ? sma(score, Math.round(params.smooth)) : score;
-    return megaRegimePosition(s, params.entry, params.exit);
+    return megaRegimePosition(s, params.entry, params.exit, {
+      close,
+      confirmDays: params.confirm,
+      trendMa: params.trendMa,
+    });
   },
 };
 

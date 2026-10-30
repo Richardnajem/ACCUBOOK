@@ -18,7 +18,7 @@ import {
   adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
   donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
   balanceOfPower, cmo, percentSlope,
-  connorsRsi, coppock, pmo, dpo, emv, atrStop, rollingMin,
+  connorsRsi, coppock, pmo, dpo, emv, atrStop, rollingMin, kernelTrend,
 } from "./ta";
 import { evaluateCustomSeries, evalFormula, type CustomIndicatorDef } from "./custom-indicators";
 
@@ -32,10 +32,16 @@ export interface MegaScoreInput {
   open?: number[];
 }
 
-/** Specs computable causally at every bar (kernel indicators excluded). */
-export const CAUSAL_SPECS: IndicatorSpec[] = ALL_SPECS.filter(
-  (s) => s.id !== "ta-kernel-slope" && s.id !== "ta-kernel-residual"
-);
+/**
+ * Every spec this engine can compute causally at each bar — now all of them.
+ *
+ * The two kernel indicators used to be excluded, because the live page scored a
+ * centred Nadaraya-Watson estimate that no backtest could reproduce (it reads
+ * later bars), so the page showed a composite nobody had measured. `kernelTrend`
+ * gives a trailing-window estimator instead, used by BOTH this engine and the
+ * live route, so the live reading is literally the last value of this series.
+ */
+export const CAUSAL_SPECS: IndicatorSpec[] = ALL_SPECS;
 
 export interface MegaScoreSeries {
   /** Composite 0-100 at each bar (50 = neutral where no indicator is ready yet). */
@@ -303,6 +309,15 @@ export function computeMegaScoreSeries(
     for (let i = 0; i < n; i++) {
       if (Number.isFinite(s[i])) put(`ta-sma-${p}`)[i] = ((close[i] - s[i]) / s[i]) * 100;
       if (Number.isFinite(e[i])) put(`ta-ema-${p}`)[i] = ((close[i] - e[i]) / e[i]) * 100;
+    }
+  }
+
+  // ─── Kernel trend (trailing window — see CAUSAL_SPECS) ────────
+  {
+    const kernel = kernelTrend(close, 8);
+    for (let i = 0; i < n; i++) {
+      if (Number.isFinite(kernel.slope[i])) put("ta-kernel-slope")[i] = kernel.slope[i];
+      if (Number.isFinite(kernel.residual[i])) put("ta-kernel-residual")[i] = kernel.residual[i];
     }
   }
 

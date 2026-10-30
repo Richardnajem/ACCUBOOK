@@ -363,7 +363,10 @@ describe("catalogue indicators match their published definitions", () => {
   });
 
   it("every catalogue indicator is a spec, and each spec is optional by default", () => {
-    expect(OPTIONAL_SPECS.length).toBe(24);
+    // 24 workbook/catalogue entries + the two kernel legs, which joined the
+    // catalogue so the balanced default is the composite the calibration
+    // measured (they used to be weighted while every backtest excluded them).
+    expect(OPTIONAL_SPECS.length).toBe(26);
     const ids = OPTIONAL_SPECS.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const spec of OPTIONAL_SPECS) {
@@ -384,12 +387,13 @@ describe("catalogue indicators match their published definitions", () => {
     const weights = defaultWeights(ALL_SPECS);
     const total = ALL_SPECS.reduce((s, spec) => s + weights[spec.id], 0);
     // The map's absolute total is not load-bearing (the composite divides by the
-    // weight it summed); only the shares are. It measured 93.5 after the Oct 2026
-    // calibration trimmed redundant trend/CCI/volatility weight.
-    expect(total).toBeCloseTo(93.5, 10);
+    // weight it summed); only the shares are. It is 88.5 because the two kernel
+    // legs left the default: they are catalogue indicators now, so this total is
+    // exactly the composite's weight in every measurement behind MEGA_BASELINE.
+    expect(total).toBeCloseTo(88.5, 10);
     expect(weights["ta-rsi-14"]).toBe(20);
     expect(weights["ta-bb-pos"]).toBe(20);
-    expect(weights["ta-rsi-14"] / total).toBeCloseTo(0.214, 3);
+    expect(weights["ta-rsi-14"] / total).toBeCloseTo(0.226, 3);
     expect(weights["ta-macd-hist"]).toBe(10);
     for (const spec of OPTIONAL_SPECS) expect(weights[spec.id]).toBe(0);
     for (const spec of ALL_SPECS.filter((s) => !s.optional)) {

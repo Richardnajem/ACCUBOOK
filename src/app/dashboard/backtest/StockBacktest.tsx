@@ -99,6 +99,8 @@ export default function StockBacktest() {
   const [useMegaPrefs, setUseMegaPrefs] = useState(false);
   const [megaPrefs, setMegaPrefs] = useState<MegaPrefs>({ weights: null, preset: null, ticker: null, hasCustomWeights: false });
   const [running, setRunning] = useState(false);
+  /** True while the Excel workbook is being built for the run on screen. */
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestOutput | null>(null);
   // Trade opened from the Trade Log — its drawer shows the exact dates and the
@@ -247,6 +249,36 @@ export default function StockBacktest() {
     setParams(prev => ({ ...prev, [key]: v }));
   };
 
+  /**
+   * The request body both the run and its Excel export send.
+   *
+   * They must be the same request: the workbook is produced by re-running this
+   * exact config so its bars, weights and per-indicator edits are the ones on
+   * screen. One builder means the export cannot drift from the run.
+   */
+  const backtestBody = useCallback((action: "runStockBacktest" | "exportWorkbook", overrides?: { strategyId?: string; params?: Record<string, number>; megaWeights?: WeightMap }) => ({
+    action,
+    symbol: ticker,
+    strategyId: overrides?.strategyId ?? strategyId,
+    initialCapital: capital,
+    years,
+    commissionBps,
+    slippageBps,
+    positionPct,
+    stopLossPct,
+    takeProfitPct,
+    maxTrades,
+    minTrades,
+    benchmarkSymbol,
+    barInterval,
+    megaWeights: overrides?.megaWeights ?? activeMegaWeights(useMegaPrefs, megaPrefs) ?? undefined,
+    // Read at run time, like the weights, so an edit made on the Mega
+    // Indicator page applies to the next run — the backtest then scores
+    // the same indicators the UI shows.
+    megaOverrides: activeMegaOverrides() ?? undefined,
+    params: overrides?.params ?? params,
+  }), [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, maxTrades, minTrades, benchmarkSymbol, useMegaPrefs, megaPrefs, barInterval]);
+
   const run = useCallback(async (overrides?: { strategyId?: string; params?: Record<string, number>; megaWeights?: WeightMap }) => {
     setRunning(true);
     setError(null);
@@ -254,28 +286,7 @@ export default function StockBacktest() {
       const res = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "runStockBacktest",
-          symbol: ticker,
-          strategyId: overrides?.strategyId ?? strategyId,
-          initialCapital: capital,
-          years,
-          commissionBps,
-          slippageBps,
-          positionPct,
-          stopLossPct,
-          takeProfitPct,
-          maxTrades,
-          minTrades,
-          benchmarkSymbol,
-          barInterval,
-          megaWeights: overrides?.megaWeights ?? activeMegaWeights(useMegaPrefs, megaPrefs) ?? undefined,
-          // Read at run time, like the weights, so an edit made on the Mega
-          // Indicator page applies to the next run — the backtest then scores
-          // the same indicators the UI shows.
-          megaOverrides: activeMegaOverrides() ?? undefined,
-          params: overrides?.params ?? params,
-        }),
+        body: JSON.stringify(backtestBody("runStockBacktest", overrides)),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Backtest failed");
@@ -285,7 +296,49 @@ export default function StockBacktest() {
     } finally {
       setRunning(false);
     }
-  }, [ticker, strategyId, capital, years, commissionBps, slippageBps, positionPct, params, stopLossPct, takeProfitPct, maxTrades, minTrades, benchmarkSymbol, useMegaPrefs, megaPrefs, barInterval]);
+  }, [backtestBody]);
+
+  /**
+   * The run on screen, as a workbook: every bar with its OHLC, both change
+   * readings, the Mega Score (raw and signal), the zone, the equity curve and
+   * the trade actions — plus one column per indicator, in 0-100 scores and in
+   * each indicator's own units. Built server-side from the same config, so the
+   * file is this run and not an approximation of it.
+   */
+  const exportWorkbook = useCallback(async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(backtestBody("exportWorkbook")),
+      });
+      if (!res.ok) {
+        let message = `Export failed (HTTP ${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch {
+          /* the body was not JSON — keep the status line */
+        }
+        throw new Error(message);
+      }
+      const blob = await res.blob();
+      const fromHeader = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1];
+      const name = fromHeader ?? `backtest-${ticker || "run"}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not build the workbook.");
+    } finally {
+      setExporting(false);
+    }
+  }, [backtestBody, ticker]);
 
   /**
    * Adoption path for the Training tab: the trained weights become the app's
@@ -588,6 +641,14 @@ export default function StockBacktest() {
               </label>
               <input type="number" value={stopLossPct} min={0} max={90} onChange={(e) => setStopLossPct(Number(e.target.value))}
                 className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+              {strategyId === "mega_score" && stopLossPct > 0 && (
+                <p className="mt-1 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+                  A stop fights this rule&apos;s own exit. Measured Oct 2026 (26 tickers × 20 years,
+                  2 bps each way): a 15 % stop on 70/25 turned 5 decisions into 129 trades, 126 of
+                  them losses, because the engine re-buys at the next open while the regime is still
+                  long. Prefer the score exit, or expect churn.
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-xs text-[var(--muted)] mb-1">
@@ -772,10 +833,22 @@ export default function StockBacktest() {
             {running ? "Running backtest…" : "▶ Run Backtest"}
           </button>
           {result && !running && (
-            <span className="text-xs text-[var(--muted)]">
-              {result.symbol} · {result.meta.name} · {barCadence(result)} ({result.dateFrom} → {result.dateTo})
-              · data: {result.dataSource === "cache" ? "cached" : "Yahoo Finance"}
-            </span>
+            <>
+              <span className="text-xs text-[var(--muted)]">
+                {result.symbol} · {result.meta.name} · {barCadence(result)} ({result.dateFrom} → {result.dateTo})
+                · data: {result.dataSource === "cache" ? "cached" : "Yahoo Finance"}
+              </span>
+              <button
+                id="backtest-export-workbook"
+                onClick={exportWorkbook}
+                disabled={exporting}
+                title="This run as an Excel workbook: every bar's open/high/low/close and change, the Mega Score (raw and smoothed), the zone, in-market, equity, drawdown — plus one column per indicator in 0-100 scores and in its own units, the indicator catalogue, trades and monthly returns"
+                className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] rounded-lg hover:bg-[var(--card-hover)] border border-[var(--card-border)] transition-colors disabled:opacity-50"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                {exporting ? "Building workbook…" : "Export Excel (all data)"}
+              </button>
+            </>
           )}
         </div>
 
@@ -846,6 +919,72 @@ export default function StockBacktest() {
               {card("Ulcer Index", s.risk.ulcerIndex.toFixed(1), "neutral", "RMS drawdown depth")}
             </div>
           </div>
+
+          {/* Loss profile — where the losing trades actually came from */}
+          {(() => {
+            const decisions = result.trades.filter((t) => t.exitDate !== null && t.reason !== "end-of-test");
+            if (decisions.length === 0) return null;
+            const losers = decisions.filter((t) => t.pnl <= 0);
+            const wins = decisions.filter((t) => t.pnl > 0);
+            const avgOf = (rows: typeof decisions, pick: (t: (typeof decisions)[number]) => number) =>
+              rows.length ? rows.reduce((sum, t) => sum + pick(t), 0) / rows.length : null;
+            const avgScore = (rows: typeof decisions) => {
+              const vals = rows.map((t) => t.entryScore).filter((v): v is number => typeof v === "number");
+              return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+            };
+            const worst = [...losers].sort((a, b) => a.returnPct - b.returnPct)[0] ?? null;
+            const lossRate = (losers.length / decisions.length) * 100;
+            const loserScore = avgScore(losers);
+            const winnerScore = avgScore(wins);
+            const reasons = [...new Set(decisions.map((t) => t.reason))];
+            return (
+              <div className="rounded-xl border border-[var(--card-border)] p-3 space-y-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="text-xs font-semibold">Loss profile</p>
+                  <p className="text-[10px] text-[var(--muted)]">
+                    {decisions.length} rule exit{decisions.length === 1 ? "" : "s"} — end-of-test closes excluded
+                    {decisions.length < 10 ? " · too few trades to read as evidence" : ""}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {card("Losing Trades", `${losers.length} of ${decisions.length}`, lossRate > 50 ? "bad" : "neutral", `${lossRate.toFixed(1)}% of exits`)}
+                  {card("Avg Loss", losers.length ? pct(avgOf(losers, (t) => t.returnPct) ?? 0, 1) : "—", "bad", `avg win ${wins.length ? pct(avgOf(wins, (t) => t.returnPct) ?? 0, 1) : "—"}`)}
+                  {card("Worst Trade", worst ? pct(worst.returnPct, 1) : "—", "bad", worst ? `${worst.entryDate} → ${worst.exitDate ?? ""}` : "")}
+                  {card("Avg Hold", losers.length ? `${(avgOf(losers, (t) => t.bars) ?? 0).toFixed(0)} d lost` : "—", "neutral", wins.length ? `${(avgOf(wins, (t) => t.bars) ?? 0).toFixed(0)} d won` : "")}
+                  {card("Avg Entry Score", loserScore !== null ? loserScore.toFixed(0) : "—", "neutral", winnerScore !== null ? `winners ${winnerScore.toFixed(0)}` : "winners —")}
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-[var(--muted)]">
+                        <th className="text-left py-1 font-medium">Exit</th>
+                        <th className="text-right py-1 font-medium">Trades</th>
+                        <th className="text-right py-1 font-medium">Losers</th>
+                        <th className="text-right py-1 font-medium">Avg return</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reasons.map((reason) => {
+                        const rows = decisions.filter((t) => t.reason === reason);
+                        const lost = rows.filter((t) => t.pnl <= 0).length;
+                        const avgReturn = avgOf(rows, (t) => t.returnPct) ?? 0;
+                        return (
+                          <tr key={reason} className="border-t border-[var(--card-border)]">
+                            <td className="py-1 capitalize">{reason.replace("-", " ")}</td>
+                            <td className="py-1 text-right tabular-nums">{rows.length}</td>
+                            <td className="py-1 text-right tabular-nums">{lost}</td>
+                            <td className={`py-1 text-right tabular-nums ${avgReturn >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}`}>
+                              {pct(avgReturn, 2)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
 
           <PanelBoard
             boardKey="backtest"

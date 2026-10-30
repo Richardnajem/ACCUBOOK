@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDailyBars } from "@/lib/market-data";
 import {
   sma, ema, rsi, macd, bollinger, atr, rollingMax, rollingMin, stochastic, cci, stdev, williamsR, stochRsi,
-  adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean,
+  adx, mfi, obv, keltnerPosition, aroon, superTrend, windowMean, kernelTrend,
   donchianPosition, rangePosition, adl, chaikinMoneyFlow, chaikinOscillator,
   balanceOfPower, cmo, percentSlope,
   connorsRsi, coppock, pmo, dpo, emv, atrStop,
@@ -123,48 +123,16 @@ async function technicalRaw(
 
     // 10/11. Nadaraya-Watson kernel regression (Gaussian, bandwidth 8) —
     // trend, slope (% of price per bar) and residual (choppiness).
-    // Centered estimate where both sides exist; causal (trailing) estimate
-    // for the most recent bars, since the LIVE bar has no future data.
-    const bw = 8;
-    const w = new Array(bw * 2 + 1).fill(0);
-    for (let d = -bw; d <= bw; d++) w[d + bw] = Math.exp(-(d * d) / (2 * bw * bw));
+    //
+    // The series comes from lib/ta's kernelTrend, which uses a TRAILING window
+    // for every bar. That is the whole point: the live reading then equals the
+    // last value of the series the score history and every backtest compute.
+    // (A centred window smooths better but reads later bars, so a centred value
+    // here could never be reproduced by a backtest.)
+    const kernel = kernelTrend(close, 8);
     const n = close.length;
-    const nwAt = (i: number): number => {
-      if (i < bw) return NaN;
-      if (i <= n - 1 - bw) {
-        // centered: window [i-bw, i+bw]
-        let ws = 0, vs = 0;
-        for (let d = -bw; d <= bw; d++) { ws += w[d + bw]; vs += w[d + bw] * close[i + d]; }
-        return vs / ws;
-      }
-      // causal: trailing window [i-2bw, i], gaussian centered at i-bw
-      let ws = 0, vs = 0;
-      for (let d = -2 * bw; d <= 0; d++) {
-        const wt = Math.exp(-(d * d) / (2 * bw * bw));
-        ws += wt; vs += wt * close[i + d];
-      }
-      return vs / ws;
-    };
-    let trendVal = NaN;
-    let slope = NaN;
-    if (n > bw * 2 + 2) {
-      trendVal = nwAt(last);
-      const prev = nwAt(last - 1);
-      if (Number.isFinite(trendVal) && Number.isFinite(prev) && prev !== 0) {
-        slope = ((trendVal - prev) / prev) * 100;
-      }
-      // Residual: stdev of (price - kernel) over the last 20 computable bars
-      const diffs: number[] = [];
-      for (let i = last; i >= Math.max(bw, last - 19); i--) {
-        const est = nwAt(i);
-        if (Number.isFinite(est)) diffs.push(close[i] - est);
-      }
-      if (diffs.length >= 5 && Number.isFinite(trendVal) && trendVal !== 0) {
-        const mean = diffs.reduce((s, v) => s + v, 0) / diffs.length;
-        const variance = diffs.reduce((s, v) => s + (v - mean) ** 2, 0) / diffs.length;
-        residualPct = (Math.sqrt(variance) / Math.abs(trendVal)) * 100;
-      }
-    }
+    const slope = kernel.slope[last];
+    if (Number.isFinite(kernel.residual[last])) residualPct = kernel.residual[last];
 
     // 12. SMA/EMA family (10-200): price distance in % (above MA = bullish)
     const maValues: Record<string, number> = {};

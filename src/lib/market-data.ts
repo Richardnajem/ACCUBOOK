@@ -312,6 +312,30 @@ export async function fetchDailyWithFailover(symbol: string, years: number): Pro
 const recentFailure = new Map<string, number>();
 const FAILURE_BACKOFF_MS = 30_000;
 
+/** Years requested when a basis change forces a full replacement refetch. */
+const BASIS_REPLACEMENT_YEARS = 60;
+
+/**
+ * True when a cached series must be REPLACED rather than extended by an
+ * incoming fetch.
+ *
+ * Sources do not share a price basis: Yahoo is dividend-adjusted, Nasdaq/Stooq
+ * are raw. Appending one to the other produces a series whose day-to-day moves
+ * are real at the seam and wrong everywhere around it, which every indicator
+ * and every backtest then inherits. An UNKNOWN cached basis (a cache written
+ * before `price_meta.source` existed, so the column is NULL) counts as a
+ * mismatch for the same reason: we cannot prove the two agree, so we must not
+ * splice them.
+ */
+export function basisMismatch(
+  cachedBars: number,
+  cachedSource: string | null | undefined,
+  incomingSource: string | null | undefined,
+): boolean {
+  if (!Number.isFinite(cachedBars) || cachedBars <= 0) return false;
+  return (cachedSource ?? null) !== (incomingSource ?? null);
+}
+
 export async function getDailyBars(symbol: string, years = 10): Promise<{ bars: Bar[]; meta: CachedMeta; source: "cache" | "yahoo" }> {
   const sym = symbol.trim().toUpperCase();
   if (!sym) throw new Error("Ticker is required.");
@@ -357,22 +381,36 @@ export async function getDailyBars(symbol: string, years = 10): Promise<{ bars: 
     throw new Error(`Market data for ${sym} is temporarily unavailable — retry shortly.`);
   }
 
-  const { bars, meta, source } = await fetchDailyWithFailover(sym, years);
+  const fetched = await fetchDailyWithFailover(sym, years);
+  let bars = fetched.bars;
+  let meta = fetched.meta;
+  let source = fetched.source;
   if (bars.length === 0) throw new Error(`No price history available for "${sym}".`);
   recentFailure.set(sym, Date.now()); // cleared below only if the write succeeds
+
+  // Source-basis guard: never blend adjusted and raw prices. A different (or
+  // unknown) cached source means the cache is replaced wholesale — and the
+  // replacement is the NEW source's own full history, not this request's
+  // window: deleting first and storing only `years` would let a 1-year export
+  // leave a 1-year cache, quietly throwing away everything older.
+  const cachedSource = metaRow?.source ?? null;
+  if (basisMismatch(cached?.n ?? 0, cachedSource, source)) {
+    try {
+      const full = await fetchDailyWithFailover(sym, BASIS_REPLACEMENT_YEARS);
+      if (full.bars.length >= bars.length) {
+        bars = full.bars;
+        meta = full.meta;
+        source = full.source;
+      }
+    } catch {
+      // Keep the window we already have. It is still one basis, never a blend.
+    }
+    db.prepare("DELETE FROM price_bars WHERE symbol = ?").run(sym);
+  }
 
   // While the market is open, drop today's partial bar (its "close" is just the
   // last trade, and it would be baked into the cache as an official close).
   const completeBars = marketOpen ? bars.filter((b) => b.date < today) : bars;
-
-  // Source-basis guard: Yahoo = adjusted, Stooq = raw. Never blend bases.
-  // If the incoming source differs from what's cached, replace that symbol's
-  // history entirely with the new source's series (it fetched the same window).
-  const cachedSource = metaRow?.source ?? null;
-  const basisChanged = cachedSource !== null && cachedSource !== source;
-  if (basisChanged) {
-    db.prepare("DELETE FROM price_bars WHERE symbol = ?").run(sym);
-  }
 
   const upsert = db.prepare(`INSERT INTO price_bars (symbol, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(symbol, date) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume`);

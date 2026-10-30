@@ -793,6 +793,88 @@ export default function MegaIndicatorPage() {
   const percentile = useMemo(() => scorePercentile(historyScores, score), [historyScores, score]);
   const historyWindowLabel =
     HISTORY_WINDOWS.find((w) => w.y === historyYears)?.label ?? `${historyYears}Y`;
+
+  // ─── What the buy/sell bands mean for THIS ticker ─────────────
+  // The bands are absolute scores measured across the calibration universe, and
+  // the composite hugs its own middle (median ≈ 65, p90 ≈ 77), so "Sell < 25"
+  // reads like an everyday rule when for most tickers it is a near-never event.
+  // Saying where each band sits in the ticker's own history is the honest unit.
+  const bandContext = useMemo(() => {
+    if (historyScores.length < 20) return null;
+    const buy = scorePercentile(historyScores, MEGA_BUY_ABOVE);
+    const sell = scorePercentile(historyScores, MEGA_SELL_BELOW);
+    return buy && sell ? { buy: buy.percentile, sell: sell.percentile, readings: buy.readings } : null;
+  }, [historyScores]);
+  /** A percentile that rounds to 0 is "under 1 %", not "never". */
+  const pctText = (p: number) => (p <= 0 ? "<1" : String(p));
+
+  // ─── What followed readings like this one ─────────────────────
+  // Buckets the charted history by decile of the score and reports the forward
+  // move from the days that sat in the SAME decile as today's reading. Stated
+  // with its sample size and window on purpose: this is an unconditional
+  // distribution of one ticker's own past, not a forecast, and the overlapping
+  // windows make it far less precise than its count suggests.
+  const forwardContext = useMemo(() => {
+    const pts = history?.points ?? [];
+    const horizon = 20; // about one trading month
+    if (pts.length < 120) return null;
+    const scores = pts.map((p) => p.score);
+    const decileOf = (v: number) =>
+      Math.min(9, Math.floor((10 * scores.filter((s) => s <= v).length) / scores.length));
+    const target = decileOf(score);
+    const rets: number[] = [];
+    for (let i = 0; i + horizon < pts.length; i++) {
+      if (decileOf(scores[i]) !== target) continue;
+      const from = pts[i].close;
+      const to = pts[i + horizon].close;
+      if (from > 0 && to > 0) rets.push((to / from - 1) * 100);
+    }
+    if (rets.length < 20) return null;
+    const sorted = [...rets].sort((a, b) => a - b);
+    return {
+      decile: target + 1,
+      horizon,
+      n: rets.length,
+      median: sorted[Math.floor(sorted.length / 2)],
+      q1: sorted[Math.floor(sorted.length * 0.25)],
+      q3: sorted[Math.floor(sorted.length * 0.75)],
+      win: rets.filter((r) => r > 0).length / rets.length,
+    };
+  }, [history, score]);
+
+  // ─── Why the score moved since the previous session ───────────
+  // Each indicator's change in its own 0-100 score, weighted the same way the
+  // composite weights it — so the moves add up to the composite's change. The
+  // change is weight-independent per indicator, so the SERVER's history (shipped
+  // weights) still explains the reading under the user's weights.
+  const scoreMoves = useMemo(() => {
+    const pts = history?.points ?? [];
+    if (pts.length < 2) return null;
+    const last = pts[pts.length - 1];
+    const prev = pts[pts.length - 2];
+    const ids = Object.keys(last.indicators).filter((id) => effectiveWeight({ id }, weights) > 0);
+    const wsum = ids.reduce((s, id) => s + effectiveWeight({ id }, weights), 0);
+    if (wsum <= 0) return null;
+    const moves = ids
+      .map((id) => {
+        const before = prev.indicators[id];
+        const now = last.indicators[id];
+        const w = effectiveWeight({ id }, weights);
+        return Number.isFinite(before) && Number.isFinite(now)
+          ? { id, name: history?.indicatorNames[id] ?? id, delta: ((now - before) * w) / wsum }
+          : null;
+      })
+      .filter((m): m is { id: string; name: string; delta: number } => m !== null && Math.abs(m.delta) >= 0.05)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+    const total = ids.reduce((s, id) => {
+      const before = prev.indicators[id];
+      const now = last.indicators[id];
+      return Number.isFinite(before) && Number.isFinite(now)
+        ? s + ((now - before) * effectiveWeight({ id }, weights)) / wsum
+        : s;
+    }, 0);
+    return { from: prev.date, to: last.date, total, moves };
+  }, [history, weights]);
   // Baseline decision for this score: buy / hold / sell (lib/mega-indicator
   // owns the bands so the UI and any strategy read the same rule).
   const action = actionFor(score);
@@ -867,6 +949,46 @@ export default function MegaIndicatorPage() {
   const verification = live?.verification ?? null;
   const [showSources, setShowSources] = useState(false);
 
+  // ─── Full-history Excel export (every day, every indicator) ───
+  // The backtest export describes one run; this describes the whole series:
+  // every trading day this ticker has, with one column per indicator in 0-100
+  // scores and in its own units, computed with the weights and edits above.
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const exportPriceHistory = async () => {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const params = new URLSearchParams({ symbol: ticker, years: "30" });
+      if (Object.keys(weights).length > 0) params.set("weights", JSON.stringify(weights));
+      if (custom.length) params.set("custom", JSON.stringify(custom));
+      if (overridePayload) params.set("overrides", overridePayload);
+      const res = await fetch(`/api/export/prices?${params.toString()}`, { cache: "no-store" });
+      if (!res.ok) {
+        let message = `Export failed (HTTP ${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch { /* the body was not JSON — keep the status line */ }
+        throw new Error(message);
+      }
+      const blob = await res.blob();
+      const fromHeader = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1];
+      const name = fromHeader ?? `price-history-${ticker}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(url);
+      setExportNote(`Saved ${name}`);
+    } catch (e) {
+      setExportNote(e instanceof Error ? e.message : "Could not build the workbook.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* ─── Controls row ─────────────────────────────────────── */}
@@ -885,6 +1007,15 @@ export default function MegaIndicatorPage() {
             Analyze
           </button>
         </form>
+
+        <button
+          onClick={exportPriceHistory}
+          disabled={exporting}
+          title="Every trading day this ticker has, with one column per indicator in 0-100 scores and in its own units — the whole history, not a backtest window"
+          className="px-3 py-2 text-xs font-medium rounded-lg border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card-hover)] disabled:opacity-50"
+        >
+          {exporting ? "Building workbook…" : "⬇ Export all days + indicators"}
+        </button>
 
         <div className="flex-1" />
 
@@ -914,6 +1045,10 @@ export default function MegaIndicatorPage() {
           ? How this works
         </button>
       </div>
+
+      {exportNote && (
+        <p className="text-xs text-[var(--muted)] font-mono break-all">{exportNote}</p>
+      )}
 
       {/* ─── Live price strip (3s polling) ─────────────────────── */}
       {q && (
@@ -1135,11 +1270,54 @@ export default function MegaIndicatorPage() {
                       p{percentile.percentile} of its own {historyWindowLabel} history
                     </span>
                   )}
-                  <span className="text-[11px] text-[var(--muted)]">
-                    Baseline: Buy ≥ {MEGA_BUY_ABOVE} · Hold {MEGA_SELL_BELOW}–{MEGA_BUY_ABOVE} · Sell &lt; {MEGA_SELL_BELOW}
+                  <span
+                    className="text-[11px] text-[var(--muted)]"
+                    title={bandContext
+                      ? `The bands are absolute scores, so their meaning depends on the ticker: over this ${historyWindowLabel} window, ${MEGA_BUY_ABOVE} sits at its p${pctText(bandContext.buy)} and ${MEGA_SELL_BELOW} at its p${pctText(bandContext.sell)} of ${bandContext.readings} readings. A low sell percentile means the exit is a rare event for this symbol.`
+                      : undefined}
+                  >
+                    Baseline: Buy ≥ {MEGA_BUY_ABOVE}
+                    {bandContext && <span className="opacity-70"> (its p{pctText(bandContext.buy)})</span>}
+                    {" · "}Hold {MEGA_SELL_BELOW}–{MEGA_BUY_ABOVE}{" · "}
+                    Sell &lt; {MEGA_SELL_BELOW}
+                    {bandContext && <span className="opacity-70"> (its p{pctText(bandContext.sell)})</span>}
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--muted)] mb-4">{action.detail}</p>
+
+                {/* Why the number changed since the last session. */}
+                {scoreMoves && (
+                  <div className="mb-4 rounded-lg border border-[var(--card-border)] p-2">
+                    <p className="text-[10px] text-[var(--muted)]">
+                      Since the previous session ({scoreMoves.from} → {scoreMoves.to}){" "}
+                      <b className={scoreMoves.total >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
+                        {scoreMoves.total >= 0 ? "+" : ""}{scoreMoves.total.toFixed(1)}
+                      </b>
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {scoreMoves.moves.slice(0, 6).map((m) => (
+                        <span
+                          key={m.id}
+                          title={`${m.name}: ${m.delta >= 0 ? "+" : ""}${m.delta.toFixed(2)} points of the composite`}
+                          className={`px-1.5 py-0.5 rounded text-[10px] tabular-nums ${
+                            m.delta >= 0
+                              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                              : "bg-red-500/10 text-red-600 dark:text-red-400"
+                          }`}
+                        >
+                          {m.name} {m.delta >= 0 ? "+" : ""}{m.delta.toFixed(1)}
+                        </span>
+                      ))}
+                      {scoreMoves.moves.length === 0 && (
+                        <span className="text-[10px] text-[var(--muted)]">No single indicator moved it by 0.05 or more.</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[9.5px] leading-relaxed text-[var(--muted)]">
+                      Each indicator&apos;s own score change, weighted the way the composite weights it · the stored
+                      readings are rounded to 0.1, so small moves are approximate.
+                    </p>
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2 text-xs">
                   <span className="px-2.5 py-1 rounded-full bg-[var(--card-hover)] text-[var(--muted)]">
                     {view?.meta.technicalCount} indicators
@@ -1242,6 +1420,23 @@ export default function MegaIndicatorPage() {
                     )}
                   </LineChart>
                 </ResponsiveContainer>
+
+                {/* What followed readings like this one — a distribution of the
+                    charted past, stated with its sample size. */}
+                {forwardContext && (
+                  <p className="mt-2 text-[10px] leading-relaxed text-[var(--muted)]">
+                    Historically, readings in decile {forwardContext.decile}/10 (where this one sits) on{" "}
+                    {history?.symbol ?? ticker} were followed {forwardContext.horizon} sessions later by a median move
+                    of{" "}
+                    <b className={forwardContext.median >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
+                      {forwardContext.median >= 0 ? "+" : ""}{forwardContext.median.toFixed(1)}%
+                    </b>
+                    {" "}(middle half {forwardContext.q1 >= 0 ? "+" : ""}{forwardContext.q1.toFixed(1)}% to{" "}
+                    {forwardContext.q3 >= 0 ? "+" : ""}{forwardContext.q3.toFixed(1)}%, {Math.round(forwardContext.win * 100)}% of them up,
+                    n = {forwardContext.n} readings). A distribution of this ticker&apos;s own {historyWindowLabel} past —
+                    not a forecast, and the windows overlap.
+                  </p>
+                )}
               </>
             )}
           </ChartPanel>

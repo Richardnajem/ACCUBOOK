@@ -3,10 +3,10 @@
 // commissions, slippage, and position sizing as a percent of equity.
 
 import { getDailyBars, Bar } from "./market-data";
-import { getStrategy, defaultParams, STRATEGIES, type StrategyDef } from "./strategies";
+import { getStrategy, defaultParams, STRATEGIES, type StrategyDef, type StrategyParam } from "./strategies";
 import { sma, atr } from "./ta";
 import { barCadence, resampleBars, type BarInterval, type BarUnit } from "./bar-resample";
-import { computeMegaScoreSeries } from "./mega-score";
+import { computeMegaScoreSeries, type MegaScoreSeries } from "./mega-score";
 import { ALL_SPECS, defaultWeights, type IndicatorOverrideMap, type WeightMap } from "./mega-indicator";
 
 export interface BacktestConfig {
@@ -20,6 +20,19 @@ export interface BacktestConfig {
   params: Record<string, number>;
   stopLossPct?: number;    // 0/undefined = disabled; else exit if price falls this % below entry
   takeProfitPct?: number;  // 0/undefined = disabled; else exit if price rises this % above entry
+  /**
+   * What happens after a risk exit (stop-loss / take-profit / trailing stop).
+   *
+   * A risk exit closes a position the RULE still wants, so by default the engine
+   * re-opens it on the next open — the trade log flags those re-entries (↻)
+   * because no fresh signal asked for them. Set `reentryNeedsSignal` to wait
+   * until the rule's own signal goes flat before re-buying (what the ATR trailing
+   * stop already does), or `riskExitCooldownBars` to refuse entries for that many
+   * bars. Both are off by default: they change measured behaviour, so they are a
+   * measurement switch, not a quiet improvement.
+   */
+  reentryNeedsSignal?: boolean;
+  riskExitCooldownBars?: number;
   /** Hard entry budget: no new position once this many trades have been opened (0/undefined = unlimited). */
   maxTrades?: number;
   /**
@@ -323,7 +336,82 @@ async function loadBars(
   return { bars: resampleBars(bars, interval), meta, source, rawBars: bars.length, interval };
 }
 
-export async function runStockBacktest(config: BacktestConfig): Promise<BacktestOutput> {
+/**
+ * A run plus the data behind it — what the Excel export needs, taken from the
+ * run itself rather than re-derived afterwards.
+ *
+ * The workbook prints one row per bar and one column per indicator, so it has to
+ * be the same bars the simulation traded (same ticker, window, frequency and
+ * resampling) and the same composite the strategy checked (same weights, same
+ * per-indicator edits). Recomputing that from the request in the exporter would
+ * be a second implementation that can silently disagree with the run; this
+ * keeps one.
+ */
+export interface BacktestDetail {
+  run: BacktestOutput;
+  /** The bars the simulation traded, already resampled to the run's frequency. */
+  bars: Bar[];
+  /** The composite and every per-indicator series, aligned to `bars`. */
+  series: MegaScoreSeries;
+  /** The score after the strategy's own smoothing — the reading its bands checked. */
+  signalScores: number[];
+  weights?: WeightMap;
+  /** Buy/exit bands when the strategy trades the composite; null for the others. */
+  bands: { entry: number; exit: number; smooth: number } | null;
+  /** How many per-indicator edits (formulas/fields) the run applied. */
+  overrideCount: number;
+}
+
+/**
+ * Strategies whose bands read the SMOOTHED composite rather than the raw score.
+ *
+ * One predicate, used by the simulation (trade-log annotations) and by the
+ * detailed run (export's "signal" column). It used to be two: the engine
+ * smoothed `mega_score` only, while the exporter smoothed both mega strategies —
+ * so a `mega_score_fast` run logged the RAW score on each trade but exported a
+ * SMOOTHED signal column for the same bar, and the two disagreed by up to a few
+ * points with no explanation.
+ */
+export function smoothsScore(strategyId: string): boolean {
+  return strategyId === "mega_score" || strategyId === "mega_score_fast";
+}
+
+/**
+ * How often a band could fire: the share of finite signal readings below the
+ * exit, and the lowest reading seen. A band that is never reached is not a slow
+ * exit, it is a rule that cannot sell — on the cached universe 70/25 fires on
+ * ~0.0-0.1 % of sessions, and any smoothing of 10+ bars makes 25 unreachable.
+ */
+export interface ExitReachability {
+  /** Bars with a finite signal reading. */
+  readings: number;
+  /** Bars whose reading sits strictly below the exit (the exit condition). */
+  below: number;
+  /** below / readings (0 when there is no reading). */
+  share: number;
+  /** Lowest reading seen (NaN when there is no reading). */
+  min: number;
+}
+
+export function exitReachability(signal: number[], exit: number): ExitReachability {
+  let readings = 0;
+  let below = 0;
+  let min = Number.POSITIVE_INFINITY;
+  for (const v of signal) {
+    if (!Number.isFinite(v)) continue;
+    readings++;
+    if (v < exit) below++;
+    if (v < min) min = v;
+  }
+  return {
+    readings,
+    below,
+    share: readings > 0 ? below / readings : 0,
+    min: readings > 0 ? min : NaN,
+  };
+}
+
+export async function runStockBacktestDetailed(config: BacktestConfig): Promise<BacktestDetail> {
   const strategy = getStrategy(config.strategyId);
   if (!strategy) throw new Error(`Unknown strategy "${config.strategyId}".`);
   const costs = resolveCosts(config);
@@ -348,9 +436,71 @@ export async function runStockBacktest(config: BacktestConfig): Promise<Backtest
     }
   }
 
-  const out = simulateCore(bars, meta, source, strategy, costs, config, true, benchmarkBars);
-  out.warnings.unshift(...extraWarnings);
-  return out;
+  const run = simulateCore(bars, meta, source, strategy, costs, config, true, benchmarkBars);
+  run.warnings.unshift(...extraWarnings);
+
+  // The composite on the SAME bars, with the same weights and edits the strategy
+  // traded. Both mega strategies smooth the score before their bands read it, so
+  // the exported "signal" column is that smoothed series; for every other
+  // strategy no band is used, and the column simply repeats the score.
+  const series = computeMegaScoreSeries(
+    {
+      high: bars.map((b) => b.high),
+      low: bars.map((b) => b.low),
+      close: bars.map((b) => b.close),
+      volume: bars.map((b) => b.volume),
+      open: bars.map((b) => b.open),
+    },
+    config.megaWeights,
+    undefined,
+    config.megaOverrides
+  );
+  const tradesComposite = smoothsScore(strategy.id);
+  const bands = tradesComposite
+    ? {
+        entry: Number(params.entry),
+        exit: Number(params.exit),
+        smooth: Math.max(1, Math.round(Number(params.smooth) || 1)),
+      }
+    : null;
+  const signalScores = bands && bands.smooth > 1 ? sma(series.score, bands.smooth) : series.score;
+
+  // A dead exit must not be silent. With a long smoothing window the exit can
+  // become unreachable on this ticker (10+ bars at 70/25 produced zero sells on
+  // the cached universe), and the run then looks like a strategy while it is
+  // buy & hold with an unused guardrail. The measured trade-off is named so
+  // raising the band is an informed choice, not a guess.
+  if (bands) {
+    const reach = exitReachability(signalScores, bands.exit);
+    const smoothed = bands.smooth > 1 ? `${bands.smooth}-day smoothed ` : "";
+    if (reach.readings > 0 && reach.below === 0) {
+      run.warnings.push(
+        `Exit band ${bands.exit} was never reached: the lowest ${smoothed}score in this run is ${reach.min.toFixed(1)}. ` +
+          `The rule cannot sell, so this run is buy & hold with an unused guardrail — not an active strategy. ` +
+          `A higher exit would fire, but measured Oct 2026 every exit above 25 gave back more return than the drawdown it avoided.`,
+      );
+    } else if (reach.readings > 0 && reach.share < 0.002) {
+      run.warnings.push(
+        `Exit band ${bands.exit} was reached on only ${reach.below} of ${reach.readings} sessions ` +
+          `(${(reach.share * 100).toFixed(2)}%; lowest ${smoothed}score ${reach.min.toFixed(1)}). ` +
+          `On this ticker the exit is effectively a never-fire guardrail — read the event count before treating it as a risk control.`,
+      );
+    }
+  }
+
+  return {
+    run,
+    bars,
+    series,
+    signalScores,
+    weights: config.megaWeights,
+    bands,
+    overrideCount: Object.keys(config.megaOverrides ?? {}).length,
+  };
+}
+
+export async function runStockBacktest(config: BacktestConfig): Promise<BacktestOutput> {
+  return (await runStockBacktestDetailed(config)).run;
 }
 
 // Core simulation, separated from data loading so comparison/optimization can
@@ -416,6 +566,17 @@ export function simulateCore(
   const minTrades = minTradesFloor(config.minTrades);
   let hitTradeLimit = false;
 
+  // Post-risk-exit entry gate (see BacktestConfig). `reentryNeedsSignal` reuses
+  // the trailing stop's own rule: the block clears only when the signal itself
+  // goes flat, so a new entry needs a fresh crossing rather than the stale
+  // reading that was in place when the stop fired.
+  const reentryNeedsSignal = Boolean(config.reentryNeedsSignal);
+  const cooldownBars =
+    config.riskExitCooldownBars && config.riskExitCooldownBars > 0
+      ? Math.floor(config.riskExitCooldownBars)
+      : 0;
+  let riskExitCooldownUntil = 0;
+
   // Benchmark series aligned to the strategy's dates (forward-filled for
   // calendar mismatches when the benchmark is a different ticker), indexed to
   // 100 at the start like the equity curve.
@@ -458,7 +619,7 @@ export function simulateCore(
   // The Mega Score strategy compares its bands against the smoothed series, so
   // the log records that exact number (plus the raw fill-day reading) — a
   // "sell < 25" exit should never show 25.1 with no explanation.
-  const smoothDays = strategy.id === "mega_score" ? Math.max(1, Math.round(Number(params.smooth) || 1)) : 1;
+  const smoothDays = smoothsScore(strategy.id) ? Math.max(1, Math.round(Number(params.smooth) || 1)) : 1;
   const signalScores: number[] | null = megaScores && smoothDays > 1 ? sma(megaScores, smoothDays) : megaScores;
   const round1 = (v: number | undefined): number | null =>
     v != null && Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
@@ -542,8 +703,13 @@ export function simulateCore(
       // rather than mislabel the last bar's score as a sell signal.
       t.exitScore = reason === "signal" ? signalScoreAt(i - 1) : reason === "end-of-test" ? null : scoreAt(i);
       t.exitSignalDate = reason === "end-of-test" ? null : reason === "signal" ? bars[i - 1]?.date ?? null : bars[i].date;
-      if (reason === "stop-loss" || reason === "take-profit" || reason === "trailing-stop") lastRiskExitBar = i;
-      if (reason === "trailing-stop") trailBlocked = true;
+      if (reason === "stop-loss" || reason === "take-profit" || reason === "trailing-stop") {
+        lastRiskExitBar = i;
+        if (cooldownBars > 0) riskExitCooldownUntil = Math.max(riskExitCooldownUntil, i + cooldownBars);
+        // Both gates describe what happens AFTER a risk exit: the trail always
+        // blocks (its own rule), a stop/target blocks when asked to.
+        if (reason === "trailing-stop" || reentryNeedsSignal) trailBlocked = true;
+      }
       const costBasis = t.shares * t.entryPrice;
       const entryFee = costBasis * commissionRate;
       t.pnl = gross - exitFee - costBasis - entryFee;
@@ -558,7 +724,7 @@ export function simulateCore(
     // session's open, i.e. it would be an overnight position. Refuse it.
     const signalLong = positions[i - 1] > 0 && !(flatAtSessionEnd && sessionLast[i - 1]);
     if (!signalLong) trailBlocked = false; // the rule went flat — a new crossing may buy
-    const wantLong = signalLong && !trailBlocked;
+    const wantLong = signalLong && !trailBlocked && i >= riskExitCooldownUntil;
     const haveLong = shares > 0;
     if (wantLong && !haveLong) buy(i);
     else if (!wantLong && haveLong) sell(i);
@@ -1077,6 +1243,34 @@ function sweepValues(param: { min?: number; max?: number; default: number; step?
   return Array.from(new Set(vals)).sort((a, b) => a - b);
 }
 
+/**
+ * The two parameters the optimizer sweeps (plus an optional third).
+ *
+ * Widest declared range wins, but research switches (`sweep: false`) are never
+ * candidates: a 0-400 trend filter would otherwise outrank the bands and the
+ * sweep would quietly stop testing the question the user asked. Exported so
+ * this selection is tested without touching the network.
+ */
+export interface OptimizerAxes {
+  x: StrategyParam;
+  y: StrategyParam;
+  z: StrategyParam | null;
+}
+
+export function optimizerAxes(strategy: StrategyDef): OptimizerAxes {
+  const sweepable = strategy.params.filter((p) => p.sweep !== false);
+  if (sweepable.length === 0) {
+    throw new Error(`${strategy.name} has no sweepable parameters to optimize.`);
+  }
+  const span = (p: StrategyParam) => (p.max ?? p.default * 2) - (p.min ?? p.default / 4);
+  const ranked = [...sweepable].sort((a, b) => span(b) - span(a));
+  return {
+    x: ranked[0],
+    y: ranked[1] || ranked[0],
+    z: sweepable.length > 2 ? ranked[2] : null,
+  };
+}
+
 export async function runStrategyOptimization(config: BacktestConfig): Promise<OptimizeResult> {
   const strategy = getStrategy(config.strategyId);
   if (!strategy) throw new Error(`Unknown strategy "${config.strategyId}".`);
@@ -1087,15 +1281,7 @@ export async function runStrategyOptimization(config: BacktestConfig): Promise<O
   const costs = resolveCosts(config);
   const { bars, meta, source } = await loadBars(config.symbol, costs.years, strategy, config.barInterval ?? "daily");
 
-  // Pick the two axes: the two params with the widest [min, max] span.
-  // A third (if present) is swept along with the second so it isn't ignored.
-  const ranked = [...strategy.params].sort((a, b) =>
-    ((b.max ?? b.default * 2) - (b.min ?? b.default / 4)) -
-    ((a.max ?? a.default * 2) - (a.min ?? a.default / 4))
-  );
-  const xAxisParam = ranked[0];
-  const yAxisParam = ranked[1] || ranked[0];
-  const zParam = strategy.params.length > 2 ? ranked[2] : null;
+  const { x: xAxisParam, y: yAxisParam, z: zParam } = optimizerAxes(strategy);
 
   const xVals = sweepValues(xAxisParam, 10);
   const yVals = sweepValues(yAxisParam, 6);
@@ -1245,9 +1431,15 @@ export async function runWalkForwardOptimization(
   const dailyTestReturns: number[] = [];
 
   // Param sweep per fold — a modest grid around the defaults (fast, and the
-  // full 300-combo grid would be needlessly slow repeated per fold).
-  const axis = strategy.params[0];
-  const axis2 = strategy.params[1];
+  // full 300-combo grid would be needlessly slow repeated per fold). Research
+  // switches stay at their defaults: sweeping a filter per fold would turn the
+  // walk-forward into a filter search instead of a band search.
+  const sweepable = strategy.params.filter((p) => p.sweep !== false);
+  if (sweepable.length === 0) {
+    throw new Error(`${strategy.name} has no sweepable parameters for walk-forward.`);
+  }
+  const axis = sweepable[0];
+  const axis2 = sweepable[1];
   const grid: Record<string, number>[] = [];
   const xs = sweepValues(axis, 6);
   const ys = axis2 ? sweepValues(axis2, 4) : [0];
