@@ -37,8 +37,15 @@ leaves your machine.
   The score drives a baseline decision shown beside the gauge —
   **Buy ≥ 70 · Hold 25–70 · Sell < 25** — with its own percentile in the ticker's
   history, where each band sits in that history, what moved since the previous
-  session, and what followed readings in the same decile. Score-over-time history is
+  session, and what followed readings in the same decile — at 20 and 60 sessions,
+  with the middle half, a 95 % interval on the median (widened for the overlapping
+  windows), the sample size and the ticker's own all-readings median as a baseline
+  the decile has to beat. Score-over-time history is
   computed with trailing windows only (no look-ahead) and cached in SQLite.
+- **Price range from realized volatility** — a driftless ±1σ band (p16 / p50 / p84)
+  at ~1, ~3 and ~12 months for any holding, on the dashboard. The middle line is
+  today's price by construction, so the card is an uncertainty band for sizing and
+  stop placement — it makes no directional claim, and says so on the card.
 - **Watchlist** — track ideas with live quotes and target-price alerts that show how
   far price is from your entry point.
 - **Indicators engine** — SMA, EMA, RSI, MACD, Bollinger Bands, ATR, Connors RSI,

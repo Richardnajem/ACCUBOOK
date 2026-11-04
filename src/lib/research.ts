@@ -684,7 +684,10 @@ function extractSheet(
   facts: CompanyFacts | null | undefined,
   chains: Record<string, string[]>,
   currency: string,
-  taxonomy: "us-gaap" | "ifrs-full"
+  taxonomy: "us-gaap" | "ifrs-full",
+  /** fiscal years of statements to rebuild — the research view wants the latest
+   *  few, a long-horizon study wants everything the filer has */
+  maxYears: number = MAX_YEARS
 ): { picks: Map<MetricKey, Map<string, MetricPick>>; annual: AnnualRow[] } {
   const picks = new Map<MetricKey, Map<string, MetricPick>>();
   for (const spec of METRIC_SPECS) {
@@ -701,13 +704,17 @@ function extractSheet(
   }
   const ends = new Set<string>();
   for (const map of picks.values()) for (const end of map.keys()) ends.add(end);
-  const sorted = [...ends].sort((a, b) => (a < b ? 1 : -1)).slice(0, MAX_YEARS);
+  const sorted = [...ends].sort((a, b) => (a < b ? 1 : -1)).slice(0, maxYears);
   return { picks, annual: buildRows(picks, sorted) };
 }
 
-export function buildAnnualStatements(facts: CompanyFacts | null | undefined): StatementBuild {
+export function buildAnnualStatements(
+  facts: CompanyFacts | null | undefined,
+  /** default keeps the research view at MAX_YEARS; studies pass more */
+  maxYears: number = MAX_YEARS
+): StatementBuild {
   const currency = detectCurrency(facts);
-  const usGaap = extractSheet(facts, US_GAAP, currency, "us-gaap");
+  const usGaap = extractSheet(facts, US_GAAP, currency, "us-gaap", maxYears);
   let picks = usGaap.picks;
   let annual = usGaap.annual;
   let taxonomy: StatementBuild["taxonomy"] = annual.length > 0 ? "us-gaap" : "none";
@@ -719,7 +726,7 @@ export function buildAnnualStatements(facts: CompanyFacts | null | undefined): S
     (r) => r.revenue === null && r.netIncome === null
   );
   if (lacksCore && facts?.facts?.["ifrs-full"]) {
-    const ifrs = extractSheet(facts, IFRS, currency, "ifrs-full");
+    const ifrs = extractSheet(facts, IFRS, currency, "ifrs-full", maxYears);
     if (ifrs.annual.some((r) => r.revenue !== null || r.netIncome !== null)) {
       picks = ifrs.picks;
       annual = ifrs.annual;
@@ -961,6 +968,20 @@ export function buildProfile(
 }
 
 // ─── Orchestration ─────────────────────────────────────────────────────────
+
+/**
+ * Raw XBRL company facts for a ticker.
+ *
+ * Exists for studies that need the full filing history: `fetchCompanyResearch`
+ * caps its statements at `MAX_YEARS` for the research view, and its response does
+ * not carry the facts. Returns null when the ticker has no SEC registrant — no
+ * throw, so a universe loop can skip a name and keep going.
+ */
+export async function fetchCompanyFacts(ticker: string): Promise<CompanyFacts | null> {
+  const resolved = await resolveCik(ticker.trim().toUpperCase());
+  if (!resolved) return null;
+  return secFetch<CompanyFacts>(`https://data.sec.gov/api/xbrl/companyfacts/CIK${resolved.cik}.json`);
+}
 
 export interface ResearchInput {
   ticker: string;

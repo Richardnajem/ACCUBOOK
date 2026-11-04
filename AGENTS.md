@@ -53,6 +53,7 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | `mega-calibration.ts` | **Training** the mega system: weights + buy/sell bands fitted on a chronological train window, scored on the held-out tail (coordinate descent over grouped indicators, benchmark-relative objective, trial-count/deflated-Sharpe diagnostic) |
 | `backup.ts`, `export.ts` | Backup / export (`csvText` + `downloadTextFile` are the shared helpers) |
 | `chart-export.ts` | **Any chart → PNG**: clones the live Recharts SVG, bakes the computed styles in, draws it to a 2× canvas. `chartSlug` / `chartFileName` are the pure, tested parts |
+| `vol-cone.ts` | **Driftless price range** (p16 / p50 / p84 of a lognormal on trailing realized vol) — an uncertainty band, never a forecast; the median is spot by construction. `GET /api/vol-cone?ticker=…`, card on the dashboard board |
 | `log-export.ts` | Error-log formats: CSV rows, JSON payload, timestamped filenames |
 | `asset-class.ts` | **Market Circle** grouping: user-assigned asset class per symbol (localStorage) or the live quote's currency, plus cash. `groupAllocation` is pure and tested. Labels are never inferred from a ticker |
 | `undo-redo.tsx` | Undo/redo provider |
@@ -92,6 +93,7 @@ npm test               # vitest (340+ tests)
 npm run build          # next build
 npm run dev:electron   # Next + Electron together
 npm run build:electron # packaged desktop app
+npm run test:fundamentals # opt-in SEC study (network): does the fundamentals score predict 12 months?
 npm run release:patch  # bump + commit + tag + push → Release workflow publishes
 ```
 
@@ -489,6 +491,53 @@ editing the document. The measured rules it protects: losses are short whipsaws
 one hold into many losses, and no trained weight map has cleared its own
 held-out luck bar — so do not adopt a map because its loss rate fell.
 
+## The fundamentals composite: a forward-return study, not a forecast
+
+`npm run test:fundamentals` (opt-in, network) asks the one question the
+fundamental scorecard has never answered: does the 0-100 composite in
+`analytics/scoring.ts` say anything about the NEXT 12 months? The technical
+composite was measured and failed; this one is not assumed in either direction.
+
+| Piece | File |
+|---|---|
+| Engine (point-in-time observations, buckets, AUC, IC, luck band) | `src/lib/fundamentals-forward.ts` |
+| Its rules, pinned on synthetic data (runs in `npm test`) | `tests/fundamentals-forward.test.ts` |
+| The real-data harness that prints the study | `tests/fundamentals-forward-live.test.ts` |
+| Full filing history for the study (`MAX_YEARS` is 5 for the research view) | `fetchCompanyFacts` + `buildAnnualStatements(facts, maxYears)` |
+
+What makes a result believable:
+
+- **No look-ahead.** A year's score enters on the first session on or after its
+  filing date, or period end + 90 days when no filing date is carried (the app's
+  `AnnualRow` does not carry one). Weights and market cap are rebuilt from that
+  year's filing (`price × shares outstanding`), never from today's cap.
+- **The baseline is the cohort.** Excess is measured against the equal-weight mean
+  of the observations readable in the same calendar year, so a rising sample
+  cannot pass as signal.
+- **Two independent reads, both required.** The pooled AUC must leave its
+  Hanley–McNeil luck band **and** the cross-sectional mean IC must reach t ≥ 2 with
+  most cohorts positive. A pooled AUC alone is exactly what flatters an
+  uninformative score on a sample that drifted up.
+- **The sample size decides.** Annual filings give one observation per symbol-year:
+  40 names × 10 years is ~400 points. That can show a strong effect and cannot
+  resolve a weak one — print n, the cohort count and the luck band beside every
+  figure.
+
+When the harness is run, record the measured numbers and the date here. Do not
+describe the composite as predictive (or as not predictive) without them.
+
+**Last run: 2026-10-31, SMOKE TEST only** — 10 large caps (JNJ, PG, KO, WMT,
+MSFT, AAPL, INTC, CSCO, XOM, CAT) to prove the SEC + price path, not the full
+40-name universe. 165 symbol-years, 16 filing-year cohorts: pooled AUC **0.485**
+(null band 0.403-0.597, inside), within-symbol AUC 0.477, mean IC **+0.056** with
+t 0.50 and 44 % of cohorts positive, top-minus-bottom bucket **−2.9 pt**. It does
+not clear the bar, but ten names cannot resolve this question — re-run
+`npm run test:fundamentals` on the whole universe and replace these numbers
+before quoting any of them. The pipe is proven; the study is still open. Known
+limits, printed by the harness itself: today's large caps carry survivorship bias,
+non-USD filers are excluded (the score has no FX step), and prior-year inputs may
+include later restatements.
+
 ## Gotchas
 
 - **Native module.** `better-sqlite3` is a compiled dependency; if `npm install`
@@ -498,3 +547,13 @@ held-out luck bar — so do not adopt a map because its loss rate fell.
   step with them when changing the DB shape.
 - Keep market data honest: if a quote source fails, surface it rather than
   substituting a stale/estimated price silently.
+
+## Release rule (mandatory)
+
+`npm run release:patch` is the only sanctioned route. It bumps `package.json` and
+`package-lock.json`, commits `Release X`, tags `vX`, pushes branch and tag, and the tag
+makes `.github/workflows/release.yml` build and publish the Setup/portable EXEs.
+
+Before tagging, prove packaging locally with `npm run build:electron` (or `npm run dist`).
+Never hand-edit the version, never push a tag by hand, and never push an update whose EXE
+build failed. Full detail is in "Cutting a numbered release" above.

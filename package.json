@@ -18,6 +18,7 @@
     "test:exit": "cross-env EXIT_SWEEP=1 vitest run tests/exit-smooth-sweep.test.ts --disableConsoleIntercept",
     "test:trained": "cross-env TRAINED_SWEEP=1 vitest run tests/trained-map-sweep.test.ts --disableConsoleIntercept",
     "test:leaveout": "cross-env LEAVE_ONE_OUT=1 vitest run tests/leave-one-out.test.ts --disableConsoleIntercept",
+    "test:fundamentals": "cross-env FUNDAMENTALS_LIVE=1 vitest run tests/fundamentals-forward-live.test.ts --disableConsoleIntercept",
     "update:app": "node scripts/update-app.js",
     "test:updates": "node scripts/test-updates.js",
     "test:update-button": "node tests/electron/verify-update-button.cjs",

@@ -20,9 +20,9 @@ import {
   adx, mfi, obv, keltner, keltnerPosition, aroon, superTrend, atr, sma, rsi,
 } from "../src/lib/ta";
 import {
-  ALL_SPECS, OPTIONAL_SPECS, actionFor, blendScoreHistory, computeMegaIndicator, defaultWeightFor,
-  defaultWeights, effectiveWeight, evenWeights, percentShares, scorePercentile,
-  MEGA_BASELINE, explainBaseline, isMegaBaseline,
+  ALL_SPECS, OPTIONAL_SPECS, actionFor, blendScoreHistory, blendScoreSeries, computeMegaIndicator,
+  defaultWeightFor, defaultWeights, effectiveWeight, evenWeights, forwardReturnDistribution,
+  percentShares, scorePercentile, MEGA_BASELINE, explainBaseline, isMegaBaseline,
 } from "../src/lib/mega-indicator";
 import { suggestIndicators, median, MAX_SUGGESTIONS, type SuggestionContext } from "../src/lib/indicator-suggestions";
 import { isEvenWeights } from "../src/lib/mega-prefs";
@@ -741,5 +741,138 @@ describe("computeMegaIndicator — per-indicator edits", () => {
     });
     expect(withJunk.indicators).toEqual(plain.indicators);
     expect(withJunk.score).toBe(plain.score);
+  });
+});
+
+// ─── Conditional forward-return distribution ───────────────────
+//
+// "What followed readings in this decile" has to survive three things the old
+// one-line version did not: it must print its own baseline (a drifting stock
+// makes every decile look profitable), keep bar alignment when a bar has no
+// score, and refuse to answer from too small a sample. Overlapping forward
+// windows are re-counted before an interval is put on the median.
+
+describe("forwardReturnDistribution", () => {
+  // 1,000 bars whose next-session return is a function of the score's decile:
+  // score 1 → −0.9 %/day, score 10 → +0.9 %/day. The all-readings median sits at
+  // zero, so a decile's conditional median is its edge and nothing else.
+  const build = () => {
+    const scores: number[] = [];
+    const closes: number[] = [];
+    let price = 100;
+    for (let i = 0; i < 1000; i++) {
+      const score = (i % 10) + 1;
+      scores.push(score);
+      closes.push(price);
+      price *= 1 + (score - 5.5) * 0.002;
+    }
+    return { scores, closes };
+  };
+
+  it("reports the conditional median, its sample and an overlap-aware interval", () => {
+    const { scores, closes } = build();
+    const dist = forwardReturnDistribution(scores, closes, 10, { horizons: [1] })!;
+    expect(dist.decile).toBe(10);
+    expect(dist.readings).toBe(1000);
+
+    const h = dist.horizons[0];
+    expect(h.horizon).toBe(1);
+    // One bar in ten carries score 10, and the last one has no session after it.
+    expect(h.n).toBe(99);
+    expect(h.nEff).toBe(99); // 1-session windows do not overlap
+    expect(h.median).toBeCloseTo(0.9, 3);
+    expect(h.winRate).toBe(1);
+    expect(h.q1).toBeLessThanOrEqual(h.median);
+    expect(h.q3).toBeGreaterThanOrEqual(h.median);
+    expect(h.medianLow).toBeLessThan(h.median);
+    expect(h.medianHigh).toBeGreaterThan(h.median);
+    // The baseline uses every reading, and the last bar has no forward move, so
+    // it drops one +0.9 % sample: its median lands on −0.1 % and the top decile's
+    // edge is the full point. That is the arithmetic, not a scaled-up claim.
+    expect(h.baselineMedian).toBeCloseTo(-0.1, 3);
+    expect(h.edge).toBeCloseTo(1, 3);
+    expect(h.separated).toBe(true);
+  });
+
+  it("sits on the baseline and says so when the decile carries no information", () => {
+    // Returns alternate whatever the score is, so every decile has the same
+    // forward distribution. The honest answer is "no edge", not a decimal that
+    // looks like one.
+    const scores: number[] = [];
+    const closes: number[] = [];
+    let price = 100;
+    for (let i = 0; i < 1000; i++) {
+      scores.push((i % 10) + 1);
+      closes.push(price);
+      price *= i % 2 === 0 ? 1.01 : 1 / 1.01;
+    }
+    const h = forwardReturnDistribution(scores, closes, 5, { horizons: [2] })!.horizons[0];
+    expect(Math.abs(h.edge)).toBeLessThan(1e-9);
+    expect(h.separated).toBe(false);
+  });
+
+  it("puts its interval on the overlap-adjusted sample, not on n", () => {
+    // Same decile logic, but with a deterministic wiggle so the 20-session sample
+    // has real dispersion. The test rebuilds the conditional sample itself and
+    // checks the reported interval against 1.96 · 1.2533 · σ / √n_eff: an
+    // interval computed on the raw n would be ~√20 times too narrow.
+    const scores: number[] = [];
+    const closes: number[] = [];
+    let price = 100;
+    for (let i = 0; i < 1000; i++) {
+      const score = (i % 10) + 1;
+      scores.push(score);
+      closes.push(price);
+      price *= 1 + (score - 5.5) * 0.002 + 0.004 * ((((i * 37) % 11) - 5) / 5);
+    }
+
+    const horizon = 20;
+    const sample: number[] = [];
+    for (let i = 0; i + horizon < closes.length; i++) {
+      if (scores[i] !== 10) continue;
+      sample.push((closes[i + horizon] / closes[i] - 1) * 100);
+    }
+    const mean = sample.reduce((s, v) => s + v, 0) / sample.length;
+    const sd = Math.sqrt(sample.reduce((s, v) => s + (v - mean) ** 2, 0) / (sample.length - 1));
+    const nEff = Math.max(2, Math.floor(sample.length / horizon));
+    const halfWidth = 1.96 * ((1.2533 * sd) / Math.sqrt(nEff));
+
+    const reported = forwardReturnDistribution(scores, closes, 10, { horizons: [horizon] })!.horizons[0];
+    expect(reported.n).toBe(sample.length);
+    expect(reported.nEff).toBe(nEff);
+    expect(reported.medianHigh - reported.median).toBeCloseTo(halfWidth, 6);
+    expect(reported.median - reported.medianLow).toBeCloseTo(halfWidth, 6);
+    // Wider than the same sample judged as if every window were independent.
+    expect(reported.medianHigh - reported.medianLow).toBeGreaterThan(
+      2 * 1.96 * ((1.2533 * sd) / Math.sqrt(sample.length))
+    );
+  });
+
+  it("keeps bar alignment when some bars have no score", () => {
+    const { scores, closes } = build();
+    const gappy = scores.map((s, i) => (i % 7 === 0 ? null : s));
+    const dist = forwardReturnDistribution(gappy, closes, 10, { horizons: [1] })!;
+    expect(dist.readings).toBeLessThan(1000);
+    // The gaps are skipped, not closed up: pairing bar i's score with bar i+1's
+    // close is the bug this guards.
+    expect(dist.horizons[0].median).toBeCloseTo(0.9, 3);
+  });
+
+  it("refuses a short series and lists a horizon it cannot judge", () => {
+    const { scores, closes } = build();
+    expect(forwardReturnDistribution(scores.slice(0, 60), closes.slice(0, 60), 50)).toBeNull();
+    const dist = forwardReturnDistribution(scores, closes, 10, { horizons: [20, 990] })!;
+    expect(dist.horizons.map((h) => h.horizon)).toEqual([20]);
+    expect(dist.skipped).toContain(990); // 10 samples at that horizon, below the 20 floor
+  });
+
+  it("exposes an aligned blend so scores and closes share one index", () => {
+    const points: Array<{ indicators: Record<string, number> }> = [
+      { indicators: { "ta-rsi-14": 40 } },
+      { indicators: { "ta-rsi-14": 41 } },
+      { indicators: {} },
+    ];
+    expect(blendScoreSeries(points)).toEqual([40, 41, null]);
+    expect(blendScoreHistory(points)).toEqual([40, 41]);
   });
 });

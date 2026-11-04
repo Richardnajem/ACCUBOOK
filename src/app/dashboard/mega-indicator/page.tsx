@@ -7,8 +7,9 @@ import {
   AreaChart, Area, LineChart, Line, Legend, ReferenceLine,
 } from "recharts";
 import {
-  actionFor, blendScoreHistory, defaultWeightFor, effectiveWeight, getSpec, percentShares, scoreColor,
-  scoreLabel, scorePercentile, MEGA_BUY_ABOVE, MEGA_SELL_BELOW, WeightMap,
+  actionFor, blendScoreHistory, blendScoreSeries, defaultWeightFor, effectiveWeight, getSpec,
+  forwardReturnDistribution, percentShares, scoreColor, scoreLabel, scorePercentile,
+  MEGA_BUY_ABOVE, MEGA_SELL_BELOW, WeightMap, type ForwardDistribution,
   MAX_OVERRIDE_NAME, MAX_OVERRIDE_UNIT, MAX_OVERRIDE_DESC, type IndicatorSpec,
 } from "@/lib/mega-indicator";
 import {
@@ -258,6 +259,120 @@ function presetWeights(p: Preset, indicators: MegaIndicator[]): WeightMap {
       break;
   }
   return base;
+}
+
+// ─── What followed readings in the same decile ─────────────────
+// A spread per horizon: the middle half of the sample, a 95 % interval on the
+// median, and the ticker's own all-readings median as a dotted baseline. The
+// baseline is the point — a drifting stock makes every decile look profitable, so
+// the panel prints the edge and says plainly when the interval still includes the
+// baseline (i.e. this decile did not separate from the ticker's average).
+function ForwardDistributionPanel({
+  dist,
+  windowLabel,
+  symbol,
+}: {
+  dist: ForwardDistribution;
+  windowLabel: string;
+  symbol: string;
+}) {
+  const fmt = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--card-border)] p-2.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="text-[10px] font-medium text-[var(--foreground)]">
+          What followed decile {dist.decile}/10 readings
+        </span>
+        <span className="text-[10px] text-[var(--muted)]">
+          {dist.readings} readings bucketed · {windowLabel} of its own history
+        </span>
+      </div>
+
+      <div className="mt-2 space-y-2.5">
+        {dist.horizons.map((h) => {
+          const lo = Math.min(h.p10, h.medianLow, h.baselineMedian, 0);
+          const hi = Math.max(h.p90, h.medianHigh, h.baselineMedian, 0);
+          const span = hi - lo || 1;
+          const x = (v: number) => Math.max(0, Math.min(100, ((v - lo) / span) * 100));
+          const tone = h.median >= 0 ? "var(--success)" : "var(--danger)";
+          return (
+            <div key={h.horizon}>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-[10px]">
+                <span className="font-medium text-[var(--foreground)]">
+                  {h.horizon} sessions
+                </span>
+                <span className="text-[var(--muted)]">
+                  median <b style={{ color: tone }}>{fmt(h.median)}</b> (95 % {fmt(h.medianLow)} … {fmt(h.medianHigh)})
+                  {" · "}middle half {fmt(h.q1)} … {fmt(h.q3)}
+                  {" · "}{Math.round(h.winRate * 100)} % up
+                  {" · "}n = {h.n} ({h.nEff} independent)
+                </span>
+              </div>
+              <div className="relative mt-1 h-6 rounded bg-[var(--grid-stroke)]/20">
+                {/* 95 % interval on the median — widened for the overlap */}
+                <div
+                  className="absolute top-3 h-1 border-l border-r"
+                  style={{
+                    left: `${x(h.medianLow)}%`,
+                    width: `${Math.max(0, x(h.medianHigh) - x(h.medianLow))}%`,
+                    borderColor: tone,
+                  }}
+                />
+                {/* middle half of the sample */}
+                <div
+                  className="absolute top-1.5 h-3 rounded-sm opacity-40"
+                  style={{
+                    left: `${x(h.q1)}%`,
+                    width: `${Math.max(0.6, x(h.q3) - x(h.q1))}%`,
+                    background: tone,
+                  }}
+                />
+                {/* median */}
+                <div
+                  className="absolute top-0.5 h-5 w-[2px]"
+                  style={{ left: `calc(${x(h.median)}% - 1px)`, background: tone }}
+                />
+                {/* zero */}
+                <div
+                  className="absolute top-0 h-full border-l border-dashed border-[var(--muted)] opacity-50"
+                  style={{ left: `${x(0)}%` }}
+                />
+                {/* the ticker's own all-readings median at this horizon */}
+                <div
+                  className="absolute top-0 h-full border-l border-dotted"
+                  style={{ left: `${x(h.baselineMedian)}%`, borderColor: "var(--foreground)", opacity: 0.7 }}
+                />
+              </div>
+              <div className="mt-1 text-[10px] leading-snug text-[var(--muted)]">
+                All {symbol} readings, same horizon: <b>{fmt(h.baselineMedian)}</b> → this decile&apos;s value
+                over that baseline{" "}
+                <b style={{ color: h.separated ? tone : undefined }}>
+                  {h.edge >= 0 ? "+" : "−"}{Math.abs(h.edge).toFixed(1)} pt
+                </b>
+                {h.separated
+                  ? " (its 95 % interval excludes the all-readings median)."
+                  : " — the interval still includes the all-readings median, so this decile has not separated from the ticker's average."}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {dist.skipped.length > 0 && (
+        <p className="mt-2 text-[10px] text-[var(--muted)]">
+          Not shown: {dist.skipped.join(" / ")} sessions — fewer than 20 past readings in this decile have that
+          much history behind them.
+        </p>
+      )}
+
+      <p className="mt-2 text-[10px] leading-relaxed text-[var(--muted)]">
+        Bar = middle half of the sample · whisker = 95 % interval on the median · dotted = median of every{" "}
+        {symbol} reading at the same horizon (its own drift). The windows start one session apart and therefore
+        overlap, so the bar is computed on roughly n ÷ horizon independent observations — which is why it is
+        wide. A distribution of this ticker&apos;s own {windowLabel} past, not a forecast.
+      </p>
+    </div>
+  );
 }
 
 export default function MegaIndicatorPage() {
@@ -808,39 +923,21 @@ export default function MegaIndicatorPage() {
   /** A percentile that rounds to 0 is "under 1 %", not "never". */
   const pctText = (p: number) => (p <= 0 ? "<1" : String(p));
 
-  // ─── What followed readings like this one ─────────────────────
-  // Buckets the charted history by decile of the score and reports the forward
-  // move from the days that sat in the SAME decile as today's reading. Stated
-  // with its sample size and window on purpose: this is an unconditional
-  // distribution of one ticker's own past, not a forecast, and the overlapping
-  // windows make it far less precise than its count suggests.
+  // ─── What followed readings in the same decile as this one ────
+  // The history is re-blended under the CURRENT weights first (the cached series
+  // is on the shipped map), then bucketed by decile. Bar alignment is preserved:
+  // an unscoreable bar stays in place as null so the forward return is still read
+  // from the close at the same index.
   const forwardContext = useMemo(() => {
     const pts = history?.points ?? [];
-    const horizon = 20; // about one trading month
-    if (pts.length < 120) return null;
-    const scores = pts.map((p) => p.score);
-    const decileOf = (v: number) =>
-      Math.min(9, Math.floor((10 * scores.filter((s) => s <= v).length) / scores.length));
-    const target = decileOf(score);
-    const rets: number[] = [];
-    for (let i = 0; i + horizon < pts.length; i++) {
-      if (decileOf(scores[i]) !== target) continue;
-      const from = pts[i].close;
-      const to = pts[i + horizon].close;
-      if (from > 0 && to > 0) rets.push((to / from - 1) * 100);
-    }
-    if (rets.length < 20) return null;
-    const sorted = [...rets].sort((a, b) => a - b);
-    return {
-      decile: target + 1,
-      horizon,
-      n: rets.length,
-      median: sorted[Math.floor(sorted.length / 2)],
-      q1: sorted[Math.floor(sorted.length * 0.25)],
-      q3: sorted[Math.floor(sorted.length * 0.75)],
-      win: rets.filter((r) => r > 0).length / rets.length,
-    };
-  }, [history, score]);
+    if (pts.length === 0) return null;
+    return forwardReturnDistribution(
+      blendScoreSeries(pts, weights),
+      pts.map((p) => p.close),
+      score,
+      { horizons: [20, 60] }
+    );
+  }, [history, weights, score]);
 
   // ─── Why the score moved since the previous session ───────────
   // Each indicator's change in its own 0-100 score, weighted the same way the
@@ -1421,21 +1518,14 @@ export default function MegaIndicatorPage() {
                   </LineChart>
                 </ResponsiveContainer>
 
-                {/* What followed readings like this one — a distribution of the
-                    charted past, stated with its sample size. */}
+                {/* What followed readings in the same decile — spread, sample
+                    size and an overlap-aware interval, against the baseline. */}
                 {forwardContext && (
-                  <p className="mt-2 text-[10px] leading-relaxed text-[var(--muted)]">
-                    Historically, readings in decile {forwardContext.decile}/10 (where this one sits) on{" "}
-                    {history?.symbol ?? ticker} were followed {forwardContext.horizon} sessions later by a median move
-                    of{" "}
-                    <b className={forwardContext.median >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
-                      {forwardContext.median >= 0 ? "+" : ""}{forwardContext.median.toFixed(1)}%
-                    </b>
-                    {" "}(middle half {forwardContext.q1 >= 0 ? "+" : ""}{forwardContext.q1.toFixed(1)}% to{" "}
-                    {forwardContext.q3 >= 0 ? "+" : ""}{forwardContext.q3.toFixed(1)}%, {Math.round(forwardContext.win * 100)}% of them up,
-                    n = {forwardContext.n} readings). A distribution of this ticker&apos;s own {historyWindowLabel} past —
-                    not a forecast, and the windows overlap.
-                  </p>
+                  <ForwardDistributionPanel
+                    dist={forwardContext}
+                    windowLabel={historyWindowLabel}
+                    symbol={history?.symbol ?? ticker}
+                  />
                 )}
               </>
             )}

@@ -18,6 +18,27 @@ const ALLOCATION_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#14b8a6"
 
 type PortfolioData = EnrichedPortfolio;
 
+interface VolConeHorizon {
+  horizon: number;
+  label: string;
+  low: number;
+  median: number;
+  high: number;
+  lowPct: number;
+  highPct: number;
+}
+
+/** Shape returned by /api/vol-cone — a band, never a direction. */
+interface VolCone {
+  spot: number;
+  volPct: number;
+  sample: number;
+  from: string;
+  to: string;
+  horizons: VolConeHorizon[];
+  note: string;
+}
+
 interface WatchRow {
   id: number;
   symbol: string;
@@ -53,6 +74,11 @@ export default function DashboardPage() {
   const [detail, setDetail] = useState<SymbolMeta | null>(null);
   const [metric, setMetric] = useState<{ title: string; subtitle?: string; sections: DetailSection[] } | null>(null);
   const [tradeDetail, setTradeDetail] = useState<Trade | null>(null);
+  // Realized-volatility price range (an uncertainty band, not a forecast)
+  const [conePick, setConePick] = useState<string>("");
+  const [cone, setCone] = useState<VolCone | null>(null);
+  const [coneSource, setConeSource] = useState<string | null>(null);
+  const [coneError, setConeError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     Promise.all([
@@ -102,6 +128,35 @@ export default function DashboardPage() {
       marketValue: p.marketValue,
       currency: portfolio?.quotes[p.symbol]?.currency ?? null,
     }));
+
+  // ─── Realized-volatility price range ───────────────────────────
+  // Fetched per selected holding. Deliberately NOT part of the 5 s quote poll: a
+  // volatility estimate moves on daily closes, not on ticks, so re-requesting it
+  // every 5 s would add load and change nothing.
+  const coneSymbol = conePick || positions[0]?.symbol || "";
+  useEffect(() => {
+    if (!coneSymbol) return;
+    let cancelled = false;
+    fetch(`/api/vol-cone?ticker=${encodeURIComponent(coneSymbol)}`, { cache: "no-store" })
+      .then(async (r) => ({ ok: r.ok, body: await r.json() }))
+      .then(({ ok, body }) => {
+        if (cancelled) return;
+        if (!ok) {
+          setCone(null);
+          setConeError(body?.error ?? "Price range unavailable.");
+          return;
+        }
+        setCone(body.cone);
+        setConeSource(body.source ?? null);
+        setConeError(null);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setCone(null);
+        setConeError(e instanceof Error ? e.message : "Price range unavailable.");
+      });
+    return () => { cancelled = true; };
+  }, [coneSymbol]);
 
   // Everything the symbol drawer needs, from data this page already holds.
   const metaOfPosition = (p: PortfolioData["quoted"][number]): SymbolMeta => ({
@@ -228,7 +283,7 @@ export default function DashboardPage() {
 
           <PanelBoard
             boardKey="dashboard"
-            ids={["holdings", "allocation", "movers", "watchlist", "market-circle", "activity"]}
+            ids={["holdings", "allocation", "vol-cone", "movers", "watchlist", "market-circle", "activity"]}
             className="grid grid-cols-1 xl:grid-cols-6 gap-6"
           >
             {/* Holdings snapshot */}
@@ -285,6 +340,81 @@ export default function DashboardPage() {
               ) : (
                 <p className="text-sm text-[var(--muted)] text-center py-16">Nothing allocated yet.</p>
               )}
+            </ChartPanel>
+
+            {/* Realized-volatility price range — a band, never a direction */}
+            <ChartPanel
+              id="vol-cone"
+              title="Price Range from Realized Volatility"
+              subtitle="A ±1σ band — the middle line is today's price, not a prediction"
+              className="xl:col-span-6"
+              right={
+                positions.length > 1 ? (
+                  <select
+                    value={coneSymbol}
+                    onChange={(e) => setConePick(e.target.value)}
+                    aria-label="Symbol for the price range"
+                    className="text-xs bg-[var(--card)] border border-[var(--card-border)] rounded px-2 py-1"
+                  >
+                    {positions.map((p) => (
+                      <option key={p.symbol} value={p.symbol}>{p.symbol}</option>
+                    ))}
+                  </select>
+                ) : undefined
+              }
+            >
+              {(() => {
+                if (!coneSymbol) {
+                  return <p className="text-sm text-[var(--muted)] text-center py-6">Add a holding to see a price range.</p>;
+                }
+                if (coneError) {
+                  return <p className="text-xs text-[var(--danger)]">{coneError}</p>;
+                }
+                if (!cone) {
+                  return <p className="text-xs text-[var(--muted)]">Loading {coneSymbol}…</p>;
+                }
+                // One shared scale across horizons so the band visibly widens.
+                const lo = Math.min(...cone.horizons.map((h) => h.low));
+                const hi = Math.max(...cone.horizons.map((h) => h.high));
+                const span = hi - lo || 1;
+                const x = (v: number) => Math.max(0, Math.min(100, ((v - lo) / span) * 100));
+                return (
+                  <div className="space-y-3">
+                    <p className="text-[11px] text-[var(--muted)]">
+                      <b className="text-[var(--foreground)]">{coneSymbol}</b> · spot {fmt(cone.spot)} · realized vol{" "}
+                      <b className="text-[var(--foreground)]">{cone.volPct.toFixed(1)}%</b> annualised from {cone.sample} daily
+                      closes ({cone.from} → {cone.to})
+                      {coneSource ? ` · ${coneSource === "cache" ? "cached prices" : "fresh fetch"}` : ""}
+                    </p>
+                    <div className="space-y-2">
+                      {cone.horizons.map((h) => (
+                        <div key={h.horizon} className="grid grid-cols-[104px_1fr_auto] items-center gap-3">
+                          <span className="text-[11px] text-[var(--muted)]">{h.label}</span>
+                          <div className="relative h-6 rounded bg-[var(--grid-stroke)]/20">
+                            <div
+                              className="absolute top-1.5 h-3 rounded-sm bg-indigo-500/25 border border-indigo-500/50"
+                              style={{ left: `${x(h.low)}%`, width: `${Math.max(0.8, x(h.high) - x(h.low))}%` }}
+                            />
+                            <div
+                              className="absolute top-0.5 h-5 w-[2px] bg-[var(--foreground)] opacity-70"
+                              style={{ left: `calc(${x(cone.spot)}% - 1px)` }}
+                            />
+                          </div>
+                          <span className="text-[11px] tabular-nums text-[var(--muted)] text-right">
+                            {fmt(h.low)} <span className="opacity-60">({h.lowPct.toFixed(1)}%)</span>
+                            {" · "}<b className="text-[var(--foreground)]">{fmt(h.median)}</b>
+                            {" · "}{fmt(h.high)} <span className="opacity-60">(+{h.highPct.toFixed(1)}%)</span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-[var(--muted)]">
+                      p16 / p50 / p84 of a driftless lognormal on trailing realized volatility. {cone.note} Use it to size
+                      a position or place a stop, not to pick a direction.
+                    </p>
+                  </div>
+                );
+              })()}
             </ChartPanel>
 
             {/* Top movers */}

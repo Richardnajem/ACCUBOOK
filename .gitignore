@@ -70,3 +70,7 @@ release/
 # project root block pushes — GitHub rejects files over 100 MB
 /Stockfolio-Portable-*.exe
 /Stockfolio-Setup-*.exe
+
+# local harnesses and their output
+tmp/
+.cloud-attachments/

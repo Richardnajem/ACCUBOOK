@@ -865,8 +865,22 @@ export function blendScoreHistory(
   points: Array<{ indicators: Record<string, number> }>,
   weights?: WeightMap | null
 ): number[] {
-  const out: number[] = [];
-  for (const p of points) {
+  return blendScoreSeries(points, weights).filter((v): v is number => v !== null);
+}
+
+/**
+ * `blendScoreHistory` without the dropping: one entry per input bar, `null` where
+ * no indicator had a reading.
+ *
+ * Anything that indexes something else by bar — forward returns against closes,
+ * for instance — must not use the compacted series, because dropping a bar shifts
+ * every later value and silently pairs a score with the wrong close.
+ */
+export function blendScoreSeries(
+  points: Array<{ indicators: Record<string, number> }>,
+  weights?: WeightMap | null
+): Array<number | null> {
+  return points.map((p) => {
     let sum = 0;
     let total = 0;
     for (const [id, score] of Object.entries(p.indicators ?? {})) {
@@ -876,9 +890,8 @@ export function blendScoreHistory(
       sum += score * w;
       total += w;
     }
-    if (total > 0) out.push(sum / total);
-  }
-  return out;
+    return total > 0 ? sum / total : null;
+  });
 }
 
 /**
@@ -907,4 +920,181 @@ export function scorePercentile(
   }
   if (readings < minReadings) return null;
   return { percentile: Math.round((atOrBelow / readings) * 100), readings };
+}
+
+// ─── What followed readings in the same decile ──────────────────────────────
+
+/** Linear-interpolated quantile of an already-sorted array. */
+function quantileOf(sorted: number[], q: number): number {
+  if (sorted.length === 0) return NaN;
+  if (sorted.length === 1) return sorted[0];
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+/** One horizon's conditional forward-return sample, in percent. */
+export interface ForwardHorizon {
+  /** Sessions ahead. */
+  horizon: number;
+  /** How many past readings in this decile had a full horizon of bars after them. */
+  n: number;
+  /**
+   * Independent-looking sample count: `n ÷ horizon`. Forward windows that start
+   * one bar apart overlap, so consecutive observations are not independent and a
+   * `√n` error bar would be ~`√horizon` times too narrow.
+   */
+  nEff: number;
+  median: number;
+  q1: number;
+  q3: number;
+  p10: number;
+  p90: number;
+  /** Share of the sample strictly above zero, 0-1. */
+  winRate: number;
+  /** 95% interval on the median, widened for the overlap (see `nEff`). */
+  medianLow: number;
+  medianHigh: number;
+  /** Median forward move of EVERY reading — the ticker's unconditional drift. */
+  baselineMedian: number;
+  /** `median − baselineMedian`, percentage points. */
+  edge: number;
+  /** Whether the 95% interval on the median excludes the baseline. */
+  separated: boolean;
+}
+
+export interface ForwardDistribution {
+  /** 1-10: which tenth of the ticker's own readings this one sits in. */
+  decile: number;
+  /** Readings the decile boundaries were built from. */
+  readings: number;
+  horizons: ForwardHorizon[];
+  /** Horizons skipped for lack of history (too few samples or too short a series). */
+  skipped: number[];
+}
+
+/**
+ * Conditional forward-return distribution: bucket the history by decile of the
+ * score, then describe what happened `horizon` sessions after every past reading
+ * that sat in the SAME decile as `reading` now.
+ *
+ * This is a description of one ticker's own past, never a forecast. Three things
+ * are deliberate:
+ *
+ *  - **It reports its own baseline.** The conditional median means nothing on its
+ *    own — a stock that drifts up 1 % a month will show a positive median in every
+ *    decile. `edge` and `separated` are what say whether the decile carried
+ *    information, and `separated` is allowed to be false.
+ *  - **Overlapping windows are not independent.** Sampling every bar with a
+ *    `horizon`-session return reuses each bar `horizon` times, so the error bar is
+ *    computed on `n ÷ horizon`, which is why it is wide. Reporting `n` alone is
+ *    what makes these readouts look far more precise than they are.
+ *  - **A small sample returns nothing.** Below `minSample` conditional readings
+ *    the horizon is listed in `skipped` rather than shown with a confident-looking
+ *    median built on a handful of days.
+ */
+export function forwardReturnDistribution(
+  scores: Array<number | null>,
+  closes: number[],
+  reading: number,
+  options: { horizons?: number[]; minSample?: number; minBars?: number } = {}
+): ForwardDistribution | null {
+  const horizons = options.horizons ?? [20, 60];
+  const minSample = options.minSample ?? 20;
+  const minBars = options.minBars ?? 120;
+  if (!Number.isFinite(reading)) return null;
+
+  const bars = Math.min(scores.length, closes.length);
+  if (bars < minBars) return null;
+
+  const finite: number[] = [];
+  for (let i = 0; i < bars; i++) {
+    const s = scores[i];
+    if (s !== null && s !== undefined && Number.isFinite(s)) finite.push(s);
+  }
+  if (finite.length < minBars) return null;
+
+  // Decile = rank of the reading inside the ticker's own score history, by
+  // binary search on a sorted copy (a bar-by-bar scan would be O(n²) on 10Y).
+  const sortedScores = [...finite].sort((a, b) => a - b);
+  // Rank by the readings STRICTLY below. Ranking by at-or-below made the bottom
+  // decile unreachable (the minimum reading had a rank of 1, so it landed in
+  // decile 2) and pushed a tie at the 90th percentile into the top decile twice.
+  const decileIndex = (v: number): number => {
+    let lo = 0;
+    let hi = sortedScores.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedScores[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.min(9, Math.floor((10 * lo) / sortedScores.length));
+  };
+  const target = decileIndex(reading);
+
+  // Decile per bar, computed once and reused by every horizon.
+  const barDecile: Array<number | null> = scores
+    .slice(0, bars)
+    .map((s) => (s !== null && s !== undefined && Number.isFinite(s) ? decileIndex(s) : null));
+
+  const horizonsOut: ForwardHorizon[] = [];
+  const skipped: number[] = [];
+
+  for (const horizon of horizons) {
+    if (!Number.isInteger(horizon) || horizon <= 0 || horizon >= bars) {
+      skipped.push(horizon);
+      continue;
+    }
+    const all: number[] = [];
+    const conditional: number[] = [];
+    for (let i = 0; i + horizon < bars; i++) {
+      const from = closes[i];
+      const to = closes[i + horizon];
+      if (!(from > 0) || !(to > 0)) continue;
+      const ret = (to / from - 1) * 100;
+      all.push(ret);
+      if (barDecile[i] === target) conditional.push(ret);
+    }
+    if (conditional.length < minSample || all.length < minSample) {
+      skipped.push(horizon);
+      continue;
+    }
+
+    const sorted = [...conditional].sort((a, b) => a - b);
+    const sortedAll = [...all].sort((a, b) => a - b);
+    const median = quantileOf(sorted, 0.5);
+    const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length;
+    const sd = Math.sqrt(
+      sorted.length > 1
+        ? sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / (sorted.length - 1)
+        : 0
+    );
+    const nEff = Math.max(2, Math.floor(sorted.length / horizon));
+    // Asymptotic SE of a sample median under normality: 1.2533 · σ / √n.
+    const se = (1.2533 * sd) / Math.sqrt(nEff);
+    const medianLow = median - 1.96 * se;
+    const medianHigh = median + 1.96 * se;
+    const baselineMedian = quantileOf(sortedAll, 0.5);
+
+    horizonsOut.push({
+      horizon,
+      n: sorted.length,
+      nEff,
+      median,
+      q1: quantileOf(sorted, 0.25),
+      q3: quantileOf(sorted, 0.75),
+      p10: quantileOf(sorted, 0.1),
+      p90: quantileOf(sorted, 0.9),
+      winRate: sorted.filter((r) => r > 0).length / sorted.length,
+      medianLow,
+      medianHigh,
+      baselineMedian,
+      edge: median - baselineMedian,
+      separated: medianLow > baselineMedian || medianHigh < baselineMedian,
+    });
+  }
+
+  if (horizonsOut.length === 0) return null;
+  return { decile: target + 1, readings: finite.length, horizons: horizonsOut, skipped };
 }
