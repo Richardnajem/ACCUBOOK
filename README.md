@@ -171,6 +171,14 @@ leaves your machine.
   source returns is exported — weekends and holidays simply have no bar, and a
   blank cell is a warm-up, never 0. API: `GET /api/export/prices?symbol=AAPL&years=30`
   (`src/lib/price-export.ts`).
+- **Price History tab** — pick a ticker and a range (1M → Max) to chart the close, read
+  every session in a sortable-by-date table (open/high/low/close, change vs the
+  previous close, volume), and see the window's change, high/low, trailing 52-week
+  band, session count and average volume. **Export CSV** writes the loaded window;
+  **Export Excel (all days + indicators)** writes the same full-history workbook the
+  Mega Indicator button produces, at the app's default weights. Weekends and holidays
+  have no bar because there was no session, and nothing is forward-filled.
+  API: `GET /api/prices?symbol=AAPL&years=5`.
 - **Strategy comparison** — run every strategy against the same ticker and rank them.
 - **Parameter optimization** — sweep strategy parameters over a grid heatmap.
 - **Frequency is a dial, not a win** — measured on 24 tickers × 15 years at 2 bps

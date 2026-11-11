@@ -29,9 +29,9 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 |---|---|
 | `src/app/layout.tsx` | Root layout (theme + undo/redo providers + `ErrorLoggerInit`) |
 | `src/app/global-error.tsx` | Root error boundary → writes to the shared error log |
-| `src/app/dashboard/` | Pages: `page.tsx`, `holdings/`, `trades/`, `watchlist/`, `research/`, `backtest/`, `mega-indicator/`, `settings/` |
+| `src/app/dashboard/` | Pages: `page.tsx`, `holdings/`, `trades/`, `watchlist/`, `price-history/`, `research/`, `backtest/`, `mega-indicator/`, `settings/` |
 | `src/app/strategies/` | Strategy catalogue: `page.tsx` (server shell) + `explorer.tsx` (client list) and `top/page.tsx` (top-5 board) |
-| `src/app/api/` | Route handlers: `trades`, `portfolio`, `watchlist`, `research`, `data`, `import`(+`/prices`), `backup`, `live-quote`, `mega-history`, `mega-indicator`, `verify-data`, `layouts` |
+| `src/app/api/` | Route handlers: `trades`, `portfolio`, `watchlist`, `prices`, `research`, `data`, `import`(+`/prices`), `backup`, `live-quote`, `mega-history`, `mega-indicator`, `verify-data`, `layouts` |
 | `src/lib/` | Domain logic — see table below |
 | `src/components/` | Shared UI: `SortableTable`, `ImportDialog`, `PanelBoard`, `ThemeProvider`, `ErrorLoggerInit` |
 | `tests/` | Vitest suite (`npm test`) |
@@ -46,6 +46,7 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | `market-data.ts`, `quote-sources.ts`, `live-quotes.ts` | Price fetching & caching (daily bars, live quotes) |
 | `intraday-data.ts` | **Intraday history** (Alpaca, minute/hour bars) for day-trading research: key from env, paginated REST, SQLite cache in `intraday_bars`/`intraday_meta`, pure `mapAlpacaBars`/`aggregateBars` helpers |
 | `price-import.ts` | Importing prices |
+| `price-history.ts` | **Price History tab's arithmetic**: window summary (change, window high/low, trailing 52-week pair, average volume, up/down sessions), CSV body, newest-first rows, and chart thinning that keeps the first and last session. Pure; pinned by `tests/price-history.test.ts` |
 | `bar-resample.ts` | **Trading frequency**: resamples daily bars to weekly/monthly and derives the cadence (`barMinutes`, `periodsPerYear`, `barUnit`) every metric is annualized on |
 | `ta.ts`, `strategies.ts`, `backtest-engine.ts` | Technical analysis + backtesting. `strategies.ts` holds the catalogue: the slow **Mega Score Regime** (`mega_score`, 70/25) and the opt-in **Mega Score Fast** (`mega_score_fast`: velocity entry + ATR trailing stop, defaults measured). `backtest-engine.ts` owns the simulation, the trailing-stop exit, and the metrics (incl. the 0-100 risk factor). |
 | `custom-indicators.ts`, `indicator-suggestions.ts` | Indicator definitions |
@@ -77,7 +78,8 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | Adding or retuning a strategy | `src/lib/strategies.ts` — every strategy carries its params, its causal signal, and (if it has one) the dated measurement behind its defaults |
 | Backtest metrics (risk factor, trade stats) | `RiskMetrics` + `BacktestSummary` in `src/lib/backtest-engine.ts`, cards in `src/app/dashboard/backtest/StockBacktest.tsx` |
 | The backtest **Excel export** (bars, every indicator per day, trades, equity) | `src/lib/backtest-export.ts` (rows/sheets/workbook), `runStockBacktestDetailed` in `src/lib/backtest-engine.ts`, `case 'exportWorkbook'` + `parseRunConfig` in `src/app/api/backtest/route.ts`, the button in `StockBacktest.tsx` (`tests/backtest-export.test.ts`) |
-| The **full-history price + indicator Excel export** (every trading day, every indicator, no backtest window) | `src/lib/price-export.ts` (rows/sheets/workbook), `src/app/api/export/prices/route.ts` (`GET /api/export/prices?symbol=…&years=…`), the button on the Mega Indicator page (`tests/price-export.test.ts`) |
+| The **full-history price + indicator Excel export** (every trading day, every indicator, no backtest window) | `src/lib/price-export.ts` (rows/sheets/workbook), `src/app/api/export/prices/route.ts` (`GET /api/export/prices?symbol=…&years=…`), the buttons on the Price History and Mega Indicator pages (`tests/price-export.test.ts`) |
+| The **Price History tab** (chart, daily table, CSV/Excel export) | `src/app/dashboard/price-history/page.tsx`, `src/lib/price-history.ts` (summary/CSV/thinning), `src/app/api/prices/route.ts` (`GET /api/prices?symbol=…&years=…`) |
 | Shared UI | `src/components/` |
 | A dashboard card | `src/components/MarketCircle.tsx` (asset-class/market circle) or the panel in `src/app/dashboard/<section>/page.tsx`; add its id to that board's `ids` so drag/layout picks it up |
 | Error logging | `src/lib/errorLogger.ts`, `src/app/global-error.tsx` |
