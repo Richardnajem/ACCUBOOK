@@ -165,9 +165,15 @@ async function main() {
   const [behind, ahead] = git("rev-list", "--left-right", "--count", `origin/${BRANCH}...HEAD`)
     .split(/\s+/)
     .map(Number);
-  if (ahead || behind) {
-    die(`Local ${BRANCH} is not in sync (${ahead} ahead, ${behind} behind). Push or pull first.`);
+  // AHEAD is the normal state of a release: the work is committed locally and
+  // THIS script is what pushes it, together with the bump commit and the tag.
+  // Refusing it left no way to cut a release after doing the work (and pushing
+  // the work un-bumped first is exactly what the release rules forbid). BEHIND
+  // stays fatal — releasing from a stale branch would drop origin's commits.
+  if (behind) {
+    die(`Local ${BRANCH} is ${behind} commit(s) behind origin — pull before releasing.`);
   }
+  if (ahead) say(`${ahead} local commit(s) will be pushed with the release.`);
 
   const current = JSON.parse(readFileSync(PACKAGE, "utf8")).version;
   const next = nextVersion(current, bump);
