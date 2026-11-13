@@ -22,6 +22,7 @@ import {
   type ResearchFiling,
   type ValuationMetric,
 } from "@/lib/research";
+import type { FigureCheck } from "@/lib/research-verify";
 
 // ─── formatting — every null prints as an em dash, never as zero ────────────
 
@@ -259,7 +260,9 @@ function ResearchView() {
     let cancelled = false;
     Promise.all(
       peers.map((p) =>
-        fetch(`/api/research?ticker=${encodeURIComponent(p)}`, { cache: "no-store" })
+        // verify=0: the cross-source read is for the company on screen, not for
+        // four peer rows (that would be 20 extra upstream requests).
+        fetch(`/api/research?ticker=${encodeURIComponent(p)}&verify=0`, { cache: "no-store" })
           .then((r) => (r.ok ? (r.json() as Promise<CompanyResearch>) : null))
           .catch(() => null)
       )
@@ -485,6 +488,9 @@ function ResearchView() {
             )}
           </div>
 
+          {/* Cross-source check — is this number confirmed anywhere else? */}
+          {data.verification && <CrossSourcePanel data={data} />}
+
           {/* Chart */}
           {chartData.length > 0 && (
             <div className="glass rounded-xl p-5">
@@ -540,6 +546,12 @@ function ResearchView() {
                 ))}
               </div>
             </div>
+
+            {data.statementsSource.predecessor && data.statementsSource.note && (
+              <p className="text-[11px] text-amber-500 dark:text-amber-400 mt-2">
+                {data.statementsSource.note}
+              </p>
+            )}
 
             {years.length === 0 ? (
               <p className="text-sm text-[var(--muted)] py-8 text-center">
@@ -695,6 +707,207 @@ function ResearchView() {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Cross-source check ────────────────────────────────────────────────────
+// Five reads of the same figures: the SEC facts the page uses, the SEC concept
+// endpoint (raw tag re-read), the SEC period frame, Nasdaq and Yahoo. Nothing
+// is averaged: a disagreement is shown with both values, and a source that did
+// not answer says so instead of counting as agreement.
+
+const STATUS_STYLE: Record<FigureCheck["matches"][number]["status"], string> = {
+  match: "text-emerald-600 dark:text-emerald-400",
+  near: "text-amber-600 dark:text-amber-400",
+  differs: "text-red-500 dark:text-red-400 font-medium",
+  unavailable: "text-[var(--muted)]",
+};
+
+const VERDICT_STYLE: Record<FigureCheck["verdict"], string> = {
+  verified: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  conflict: "border-red-500/30 bg-red-500/10 text-red-500 dark:text-red-400",
+  "single-source": "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  "not-reported": "border-[var(--card-border)] text-[var(--muted)]",
+};
+
+const VERDICT_LABEL: Record<FigureCheck["verdict"], string> = {
+  verified: "verified",
+  conflict: "conflict",
+  "single-source": "one source",
+  "not-reported": "not reported",
+};
+
+function deltaLabel(diffPct: number | null): string {
+  if (diffPct === null) return "";
+  const pct = diffPct * 100;
+  if (Math.abs(pct) < 0.05) return "0.0%";
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+}
+
+function CrossSourcePanel({ data }: { data: CompanyResearch }) {
+  const verification = data.verification;
+  const [fy, setFy] = useState<number | null>(null);
+  if (!verification) return null;
+
+  const figures = verification.figures;
+  const years = [...new Set(figures.map((f) => f.fy))].sort((a, b) => b - a);
+  const activeFy = fy !== null && years.includes(fy) ? fy : years[0] ?? null;
+  const rows = figures.filter((f) => f.fy === activeFy);
+  const sources = verification.sources;
+  const independent = sources.filter((s) => s.kind !== "sec-primary");
+
+  const tally = (verdict: FigureCheck["verdict"]) => rows.filter((r) => r.verdict === verdict).length;
+  const reported = rows.length - tally("not-reported");
+  const fmt = (value: number | null, metric: string) =>
+    value === null ? "—" : metric === "epsDiluted" ? moneyExact(value, data.currency) : money(value, data.currency);
+
+  return (
+    <div className="glass rounded-xl p-5" data-chart-title={`${data.profile.ticker} cross-source check`}>
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h3 className="font-semibold">Cross-source check</h3>
+        <p className="text-[11px] text-[var(--muted)]">
+          {independent.length + 1} sources · {tally("verified")}/{reported} figures of FY{activeFy ?? "—"} confirmed · {" "}
+          <span className={tally("conflict") > 0 ? "text-red-500 dark:text-red-400" : ""}>
+            {tally("conflict")} conflict{tally("conflict") === 1 ? "" : "s"}
+          </span>
+          {tally("single-source") > 0 ? ` · ${tally("single-source")} single-source` : ""}
+        </p>
+      </div>
+
+      {/* Source health — a failed source is listed with its error, never hidden */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-[11px] text-[var(--muted)]">
+        {sources.map((s) => (
+          <span key={s.id} className="inline-flex items-center gap-1.5">
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${
+                s.kind === "sec-primary"
+                  ? "bg-indigo-500"
+                  : s.ok
+                    ? "bg-emerald-500"
+                    : "bg-red-500"
+              }`}
+            />
+            <span className="text-[var(--foreground)]">{s.name}</span>
+            {s.kind === "sec-primary" ? (
+              <span>· this page</span>
+            ) : s.ok ? (
+              <span>
+                · {s.figures} values · {s.ms}ms
+              </span>
+            ) : (
+              <span title={s.error}>· unavailable{s.error ? `: ${s.error}` : ""}</span>
+            )}
+          </span>
+        ))}
+      </div>
+
+      {years.length > 1 && (
+        <div className="flex items-center gap-1 mt-3">
+          <span className="text-[11px] text-[var(--muted)] mr-1">Fiscal year</span>
+          {years.map((y) => (
+            <button
+              key={y}
+              onClick={() => setFy(y)}
+              className={`px-2 py-0.5 text-[11px] rounded border transition-colors ${
+                y === activeFy
+                  ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-500 dark:text-indigo-400"
+                  : "border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+              }`}
+            >
+              FY{y}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <p className="text-sm text-[var(--muted)] py-6 text-center">
+          {verification.note || "No cross-source figures were returned for this filer."}
+        </p>
+      ) : (
+        <div className="overflow-x-auto mt-3">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--muted)] border-b border-[var(--card-border)]">
+                <th className="py-2 pr-4 font-medium">Figure</th>
+                <th className="py-2 px-3 font-medium text-right whitespace-nowrap">This page (SEC)</th>
+                {independent.map((s) => (
+                  <th key={s.id} className="py-2 px-3 font-medium text-right whitespace-nowrap">
+                    {s.name.replace("SEC ", "")}
+                  </th>
+                ))}
+                <th className="py-2 pl-3 font-medium text-right">Check</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.metric} className="border-b border-[var(--card-border)]/60">
+                  <td className="py-2 pr-4 text-[var(--muted)] whitespace-nowrap">{row.label}</td>
+                  <td className="py-2 px-3 text-right tabular-nums whitespace-nowrap">
+                    {fmt(row.primary, row.metric)}
+                  </td>
+                  {independent.map((s) => {
+                    const match = row.matches.find((m) => m.source === s.name);
+                    return (
+                      <td key={s.id} className="py-2 px-3 text-right tabular-nums whitespace-nowrap" title={match?.note}>
+                        <span className={STATUS_STYLE[match?.status ?? "unavailable"]}>
+                          {fmt(match?.value ?? null, row.metric)}
+                        </span>
+                        {match?.status === "differs" || match?.status === "near" ? (
+                          <span className="block text-[10px] font-normal text-[var(--muted)]">
+                            {deltaLabel(match.diffPct)}
+                          </span>
+                        ) : null}
+                      </td>
+                    );
+                  })}
+                  <td className="py-2 pl-3 text-right">
+                    <span
+                      className={`inline-block px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${VERDICT_STYLE[row.verdict]}`}
+                    >
+                      {VERDICT_LABEL[row.verdict]}
+                      {row.verdict === "verified" && row.confirmedBy > 1 ? ` ×${row.confirmedBy}` : ""}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {data.priceSources && data.priceSources.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-[var(--card-border)]">
+          <p className="text-[11px] text-[var(--muted)]">
+            <span className="text-[var(--foreground)]">Price</span> — {data.priceAgreement?.agreeing ?? 0} of{" "}
+            {data.priceSources.length} quote sources answered
+            {data.priceAgreement?.spreadPct != null
+              ? `, spread ${data.priceAgreement.spreadPct.toFixed(3)}% across them`
+              : ""}
+            :
+          </p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-[11px] text-[var(--muted)]">
+            {data.priceSources.map((s) => (
+              <span key={s.source} className="inline-flex items-center gap-1">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.ok ? "bg-emerald-500" : "bg-red-500"}`} />
+                <span className="text-[var(--foreground)]">{s.source}</span>
+                <span className="tabular-nums">
+                  {s.ok && s.price !== null ? `$${s.price.toFixed(2)}` : `unavailable${s.error ? ` (${s.error})` : ""}`}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <p className="text-[11px] text-[var(--muted)] mt-3">{verification.note}</p>
+      <p className="text-[11px] text-[var(--muted)] mt-1">
+        A figure is <span className="text-emerald-600 dark:text-emerald-400">verified</span> when at least one independent
+        source agrees and none disagrees; <span className="text-red-500 dark:text-red-400">conflict</span> means two sources
+        report materially different values (both are shown); <span className="text-amber-600 dark:text-amber-400">one source</span>{" "}
+        means nobody else publishes that line. Checked {fetchedAt(verification.checkedAt)}.
+      </p>
     </div>
   );
 }

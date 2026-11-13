@@ -10,6 +10,7 @@ import {
   computeRatios,
   detectCurrency,
   extractAnnualSeries,
+  formatMoneyShort,
   latestShares,
   type CompanyFacts,
   type CompanySubmissions,
@@ -132,6 +133,46 @@ describe("extractAnnualSeries", () => {
     expect(built.annual[1].revenue).toBe(1010); // latest filed value
   });
 
+  it("does not let a later filing of a lower-priority tag replace the figure", () => {
+    // Apple FY2022: the balance sheet reports 23.6bn of cash & equivalents,
+    // while the restricted-cash series in the next 10-K's comparative says
+    // 25.0bn. The lower-priority tag is filed LATER — it must not win.
+    const cashChain: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          CashAndCashEquivalentsAtCarryingValue: concept([
+            { end: "2022-12-31", val: 100, fy: 2022, fp: "FY", form: "10-K", filed: "2023-02-01" },
+          ]),
+          CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents: concept([
+            { end: "2022-12-31", val: 110, fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01" },
+          ]),
+        },
+      },
+    };
+    const series = extractAnnualSeries(
+      cashChain,
+      ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
+      ["USD"],
+      true
+    );
+    expect(series.get("2022-12-31")?.value).toBe(100);
+    expect(series.get("2022-12-31")?.tag).toBe("CashAndCashEquivalentsAtCarryingValue");
+  });
+
+  it("still applies a restatement filed later under the same tag", () => {
+    const restated: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          Assets: concept([
+            { end: "2022-12-31", val: 900, fy: 2022, fp: "FY", form: "10-K", filed: "2023-02-01" },
+            { end: "2022-12-31", val: 910, fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01" },
+          ]),
+        },
+      },
+    };
+    expect(extractAnnualSeries(restated, ["Assets"], ["USD"], true).get("2022-12-31")?.value).toBe(910);
+  });
+
   it("reports the concept that supplied the value", () => {
     const series = extractAnnualSeries(facts, ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"], ["USD"], false);
     expect(series.get("2023-12-31")?.tag).toBe("RevenueFromContractWithCustomerExcludingAssessedTax");
@@ -157,6 +198,27 @@ describe("buildAnnualStatements", () => {
     // Current assets / liabilities are absent from this fixture entirely.
     expect(built.notes.some((n) => n.startsWith("Current assets"))).toBe(true);
     expect(built.notes.some((n) => n.startsWith("Gross profit"))).toBe(false);
+    expect(built.tags.revenue).toBe("RevenueFromContractWithCustomerExcludingAssessedTax");
+  });
+
+  it("records the concept behind each period, not just the newest one", () => {
+    // The cross-source check re-reads each year from its own tag; a filer that
+    // switched concept between years must not be compared against one series.
+    const switched: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          RevenueFromContractWithCustomerExcludingAssessedTax: concept([
+            { start: "2023-01-01", end: "2023-12-31", val: 1200, fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-01" },
+          ]),
+          Revenues: concept([
+            { start: "2022-01-01", end: "2022-12-31", val: 1000, fy: 2022, fp: "FY", form: "10-K", filed: "2023-02-01" },
+          ]),
+        },
+      },
+    };
+    const built = buildAnnualStatements(switched);
+    expect(built.periodTags.revenue?.["2023-12-31"]).toBe("RevenueFromContractWithCustomerExcludingAssessedTax");
+    expect(built.periodTags.revenue?.["2022-12-31"]).toBe("Revenues");
     expect(built.tags.revenue).toBe("RevenueFromContractWithCustomerExcludingAssessedTax");
   });
 
@@ -302,6 +364,139 @@ describe("non-USD (IFRS) filers", () => {
     expect(v.marketCapReporting).toBeNull();
     expect(v.priceToEarnings).toBeNull();
     expect(v.enterpriseValue).toBeNull();
+  });
+});
+
+// Revenue: the contract-revenue tag is only "revenue from contracts with
+// customers". Berkshire's FY2025 10-K tags $247.2bn there and $371.4bn of total
+// revenue; showing the first one alone understates the income statement by a
+// third. The total wins for the SAME period, and the swap is named in the notes.
+const berkshireLike: CompanyFacts = {
+  facts: {
+    "us-gaap": {
+      RevenueFromContractWithCustomerExcludingAssessedTax: concept([
+        { start: "2025-01-01", end: "2025-12-31", val: 247.2e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+        { start: "2024-01-01", end: "2024-12-31", val: 249.7e9, fy: 2024, fp: "FY", form: "10-K", filed: "2025-02-28" },
+      ]),
+      Revenues: concept([
+        { start: "2025-01-01", end: "2025-12-31", val: 371.4e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+        { start: "2024-01-01", end: "2024-12-31", val: 371.4e9, fy: 2024, fp: "FY", form: "10-K", filed: "2025-02-28" },
+      ]),
+      NetIncomeLoss: concept([
+        { start: "2025-01-01", end: "2025-12-31", val: 66.968e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+      ]),
+    },
+  },
+};
+
+describe("revenue completeness", () => {
+  it("uses the total-revenue line when the contract tag covers only part of the business", () => {
+    const built = buildAnnualStatements(berkshireLike);
+    expect(built.annual[0].revenue).toBe(371.4e9);
+    expect(built.tags.revenue).toBe("Revenues");
+    expect(built.notes.some((n) => n.includes("total revenue") && n.includes("FY2025"))).toBe(true);
+    expect(built.notes.some((n) => n.includes("247.2bn"))).toBe(true);
+  });
+
+  it("keeps the contract figure when the total is not materially larger", () => {
+    const close: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          RevenueFromContractWithCustomerExcludingAssessedTax: concept([
+            { start: "2025-01-01", end: "2025-12-31", val: 706.4e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-03-01" },
+          ]),
+          Revenues: concept([
+            { start: "2025-01-01", end: "2025-12-31", val: 713.2e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-03-01" },
+          ]),
+        },
+      },
+    };
+    const built = buildAnnualStatements(close);
+    expect(built.annual[0].revenue).toBe(706.4e9);
+    expect(built.notes.some((n) => n.includes("total revenue"))).toBe(false);
+  });
+
+  it("keeps the contract figure when the total is smaller", () => {
+    const smaller: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          RevenueFromContractWithCustomerExcludingAssessedTax: concept([
+            { start: "2025-01-01", end: "2025-12-31", val: 900, fy: 2025, fp: "FY", form: "10-K", filed: "2026-03-01" },
+          ]),
+          Revenues: concept([
+            { start: "2025-01-01", end: "2025-12-31", val: 800, fy: 2025, fp: "FY", form: "10-K", filed: "2026-03-01" },
+          ]),
+        },
+      },
+    };
+    expect(buildAnnualStatements(smaller).annual[0].revenue).toBe(900);
+  });
+
+  it("never borrows a total from a different period", () => {
+    const otherYear: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          RevenueFromContractWithCustomerExcludingAssessedTax: concept([
+            { start: "2025-01-01", end: "2025-12-31", val: 247.2e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+          ]),
+          Revenues: concept([
+            { start: "2023-01-01", end: "2023-12-31", val: 364.5e9, fy: 2023, fp: "FY", form: "10-K", filed: "2024-02-28" },
+          ]),
+        },
+      },
+    };
+    const built = buildAnnualStatements(otherYear);
+    expect(built.annual.find((r) => r.fy === 2025)?.revenue).toBe(247.2e9);
+    expect(built.annual.find((r) => r.fy === 2023)?.revenue).toBe(364.5e9);
+  });
+});
+
+// Some filers tag only basic EPS (Berkshire does, stating in the text that
+// diluted equals basic). Showing "—" for a filed per-share figure is worse than
+// showing the filed basic figure with a note naming it.
+describe("EPS without a diluted tag", () => {
+  const basicOnly: CompanyFacts = {
+    facts: {
+      "us-gaap": {
+        Revenues: concept([
+          { start: "2025-01-01", end: "2025-12-31", val: 371.4e9, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+        ]),
+        EarningsPerShareBasic: unitConcept("USD/shares")([
+          { start: "2025-01-01", end: "2025-12-31", val: 46.47, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+        ]),
+      },
+    },
+  };
+
+  it("shows the filed basic figure and says which tag supplied it", () => {
+    const built = buildAnnualStatements(basicOnly);
+    expect(built.annual[0].epsDiluted).toBe(46.47);
+    expect(built.tags.epsDiluted).toBe("EarningsPerShareBasic");
+    expect(built.notes.some((n) => n.includes("BASIC EPS"))).toBe(true);
+  });
+
+  it("prefers a diluted tag when the filer files one", () => {
+    const both: CompanyFacts = {
+      facts: {
+        "us-gaap": {
+          ...(basicOnly.facts!["us-gaap"] as Record<string, unknown>),
+          EarningsPerShareDiluted: unitConcept("USD/shares")([
+            { start: "2025-01-01", end: "2025-12-31", val: 46.21, fy: 2025, fp: "FY", form: "10-K", filed: "2026-02-28" },
+          ]),
+        },
+      },
+    };
+    const built = buildAnnualStatements(both);
+    expect(built.annual[0].epsDiluted).toBe(46.21);
+    expect(built.notes.some((n) => n.includes("BASIC EPS"))).toBe(false);
+  });
+});
+
+describe("formatMoneyShort", () => {
+  it("labels the scale it used", () => {
+    expect(formatMoneyShort(371.4e9, "USD")).toBe("USD 371.4bn");
+    expect(formatMoneyShort(247.2e9, "DKK")).toBe("DKK 247.2bn");
+    expect(formatMoneyShort(-1.5e6, "USD")).toBe("USD -1.5m");
   });
 });
 

@@ -18,7 +18,7 @@ export async function GET() {
   const symbols = snapshot.positions.filter((p) => p.shares > 0).map((p) => p.symbol);
 
   const quotes: Record<string, {
-    price: number; change: number; changePercent: number; previousClose: number | null;
+    price: number; change: number | null; changePercent: number | null; previousClose: number | null;
     name: string | null; currency: string;
     bid: number | null; ask: number | null; bidSize: number | null; askSize: number | null;
     spreadPct: number | null; bookSource: string | null;
@@ -32,10 +32,18 @@ export async function GET() {
           getLiveQuote(sym),
           fetchMultiSourceQuote(sym).catch(() => null),
         ]);
+        // A feed that answers without a usable price is NOT a $0 quote: writing
+        // 0 here valued the whole position at zero (−100 % unrealized). Leave
+        // the symbol unquoted instead, with the reason surfaced.
+        const last = q.displayPrice ?? q.price;
+        if (last == null || !Number.isFinite(last) || last <= 0) {
+          errors[sym] = `The quote feed returned no usable price (${q.exchange ?? "unknown source"}); the position is valued at cost.`;
+          return;
+        }
         quotes[sym] = {
-          price: q.displayPrice ?? q.price ?? 0,
-          change: q.displayChange ?? q.change ?? 0,
-          changePercent: q.displayChangePercent ?? q.changePercent ?? 0,
+          price: last,
+          change: q.displayChange ?? q.change,
+          changePercent: q.displayChangePercent ?? q.changePercent,
           previousClose: q.lastRegularClose ?? q.previousClose,
           name: q.name,
           currency: q.currency ?? "USD",

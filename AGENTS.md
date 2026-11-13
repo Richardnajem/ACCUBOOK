@@ -60,6 +60,7 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | `undo-redo.tsx` | Undo/redo provider |
 | `errorLogger.ts` | **Client error logging** (localStorage `stockfolio-error-log`) |
 | `research.ts` | **SEC EDGAR company research** — ticker→CIK, annual XBRL statements (10-K/20-F/40-F), IFRS fallback, currency detection + FX, ratios, valuation vs live quote, filings. All pure helpers are testable and exported. |
+| `research-verify.ts` | **Cross-source check** of the same annual figures: SEC company concept, SEC frames, Nasdaq, Yahoo. Pure comparison in `compareFigures`; every reader fails independently. |
 
 ## Where to edit
 
@@ -84,6 +85,7 @@ Recharts · `xlsx` / `pdf-parse` · Electron.
 | A dashboard card | `src/components/MarketCircle.tsx` (asset-class/market circle) or the panel in `src/app/dashboard/<section>/page.tsx`; add its id to that board's `ids` so drag/layout picks it up |
 | Error logging | `src/lib/errorLogger.ts`, `src/app/global-error.tsx` |
 | Company research (profile, statements, ratios, valuation, filings) | `src/lib/research.ts`, `src/app/api/research/route.ts`, `src/app/dashboard/research/page.tsx` |
+| The research tab's cross-source check (which sources, tolerances, verdicts) | `src/lib/research-verify.ts`, `CrossSourcePanel` in `src/app/dashboard/research/page.tsx` |
 | The strategy catalogue (list, filters, top-5 board) | `src/lib/strategies-db.ts` (**generated** — never hand-edit), `src/lib/strategies-catalog.ts` (ranking + horizon), `src/lib/strategies-researched.ts` (sourced additions), `src/app/strategies/`, `scripts/build-strategies.mjs` |
 
 ## Run it
@@ -407,8 +409,55 @@ container when the nearest heading is not the filename you want.
 - `SEC_USER_AGENT` should carry a real contact address for SEC fair access (defaults
   to a placeholder). Responses are cached in-process (tickers 1h, company data 15m,
   FX 1h); `clearResearchCache()` exists for tests.
+- **Revenue is the filer's total, not just contract revenue.** The
+  `RevenueFromContractWithCustomer*` tags cover only revenue from contracts with
+  customers; Berkshire's FY2025 10-K tags $247.2bn there against $371.4bn of total
+  revenues, so reading the first tag alone understated a mega-cap by a third. When
+  the filer also tags `Revenues`/`SalesRevenueNet` for the SAME period and it is
+  >2 % larger, the total wins and the swap is named in `notes`. Never borrow a
+  total from another year, and never change the chain priority itself.
+- **A successor registrant is followed, not left blank.** A reorganisation can move
+  a ticker to an entity with no annual report yet (Nov 2026: XOM → ExxonMobil
+  Holdings Corp, 10-Qs only, while the 10-Ks sat under CIK 34088). When the mapped
+  CIK yields no annual rows, `findStatementRegistrant` searches EDGAR's company
+  feed for annual filers sharing the name's leading token, reads their facts, and
+  `statementsSource` + a note say which CIK was used. The fallback runs only when
+  the mapped filer has nothing, and a candidate whose name does not share the token
+  is rejected — a wrong company would be worse than an empty page.
+- **Only basic EPS filed → say so.** `EarningsPerShareBasic` is the last fallback in
+  the EPS chain; when it supplies the newest period the notes state that the filer
+  files no diluted per-share fact. Do not relabel it as diluted silently.
+- **Concept priority beats a later, lower-priority filing.** A restatement
+  overrides a period only when it was filed under the SAME concept. Otherwise the
+  next 10-K's comparative column would relabel a line through the second tag in
+  the chain — Apple's FY2022 cash went from $23.6bn (balance sheet,
+  `CashAndCashEquivalentsAtCarryingValue`) to $25.0bn (the restricted-cash series,
+  filed two years later) and the row mixed two definitions. Found by the
+  cross-source check, not by reading the code.
+- **Five sources, compared and never averaged.** `research-verify.ts` reads the same
+  annual figures from the SEC company facts (the page's own), the SEC company
+  concept endpoint (raw tag series), the SEC period frame (matched by CIK),
+  Nasdaq and Yahoo, and the price leg adds the five quote sources. A figure is
+  `verified` only when at least one independent read agrees (`match` ≤0.5 %, or
+  `near` ≤1.5 %, both shown with their delta); any larger gap is a `conflict` with
+  both values. A failed source is reported as unavailable and never counts as
+  agreement. Comparison rules that must stay: capex is compared by amount (vendors
+  sign it negative), a vendor `0` against a real figure is a blank in its feed, and
+  a source whose money lines share one constant factor is reporting another
+  currency/scale (×1.174 for Nasdaq's ASML) — mark it unavailable with the factor
+  instead of emitting a dozen false conflicts.
 - Tests: `tests/research.test.ts` covers period extraction, restatements, IFRS/currency,
-  ratio math, valuation with/without FX and filing links. It never hits the network.
+  ratio math, valuation with/without FX, filing links, revenue totals and basic-EPS
+  fallback; `tests/research-verify.test.ts` pins the comparison rules and both
+  vendor parsers. Neither hits the network. `npm run test:research`
+  (`tests/research-sources-live.test.ts`, opt-in) is the real-data study.
+
+**Last live run: 2026-11-13**, 8 names (AAPL, MSFT, KO, JPM, BRK-B, XOM, WMT, ASML):
+72 of 77 latest-year figures confirmed by an independent source (94 %), 5 conflicts,
+all definitional and shown as such — JPM revenue −7.8 % (Nasdaq's net-revenue line)
+and cash +98 % (deposits with banks), JPM net income −2.4 % and ASML net income
+−2.3 % (net income to common vs total), XOM revenue −2.5 %. AAPL, MSFT, KO, BRK-B and
+WMT came back fully confirmed. Re-run it after a filing season before quoting.
 
 ## Strategy catalogue (workbook → screens)
 
@@ -467,6 +516,44 @@ When adding a row or a dive: a figure needs the “Typical:” prefix unless it 
 sourced, a citation needs a page you opened, and an unassessed method stays
 unranked. Do not fill a blank by inference — the drawer already explains a blank
 more honestly than a guess would.
+
+## P&L reconciles with the cash ledger, and a missing quote is never a number
+
+Holdings/Trades are the tabs where a wrong figure costs money, so three rules
+are enforced in `src/lib/portfolio.ts` and pinned by `tests/portfolio.test.ts`:
+
+- **A realized sale carries its own share of the BUY fee.** Each lot stores
+  `feePerShare`; a partial sell matches `take × (price + feePerShare)`. Without
+  it the whole buy fee stayed with the shares left behind and realized P&L was
+  reported gross of it — while the tab said “net of fees”. The invariant it
+  restores: `realized + unrealized + dividends − standalone fee events =
+  totalReturn` (equity − invested). Measured on the local ledger 2026-11-13:
+  NVDA's 25→20 share partial sell was $0.20 high; after the fix the identity is
+  exact to the cent. On the same book the four weights now add to the cash
+  share (22.6 + 13.4 + 8.4 + 1.8 = 46.2 % of $185,107.87 equity).
+- **Weight is a share of total equity, cash included** — the same unit as the
+  allocation donut. Dividing by positions only made every row read larger than
+  its slice next to a donut that contained cash.
+- **No usable quote is not a $0 quote.** A feed that answers with `0`/`NaN`
+  used to value the position at zero and report a −100 % loss as if it were
+  real; `/api/portfolio` now leaves the symbol unquoted with the reason, and
+  `enrichWithQuotes` marks the position `priced: false`, values it at COST, and
+  surfaces `unpricedCount` / `unpricedValue`. The pages print “at cost” and
+  exclude it from the day change and unrealized P&L — never from equity, which
+  would understate the book. Same rule for `stooqFallback`: its OHLC row has no
+  previous close (`open` is today's), so change/previousClose stay null there
+  instead of being labelled “vs yesterday's close”.
+
+**Audit of the other tabs against outside references, 2026-11-13** (AAPL, MSFT,
+NVDA, SPY; one-year windows from the real cache): last close matched Yahoo's own
+`lastRegularClose` to 0.000 %, the window high matched Yahoo's 52-week high to
+0.001 %, and the low differed by 0.19–0.50 % — expected, because the tab's pair is
+a trailing 252-CLOSE reading over its own window, not an intraday 52-week extreme.
+The Mega Indicator route's headline values (trend 50/200, RSI-14, MACD histogram
+% of price, ATR %, 63-day momentum) matched independent implementations of the
+published definitions to 5e-5. Re-run that comparison before trusting a new
+conversion added to `api/mega-indicator/route.ts`; the formulas themselves are
+pinned by `tests/indicator-accuracy.test.ts`.
 
 ## Price basis is replaced, never blended
 

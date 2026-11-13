@@ -61,6 +61,9 @@ export async function GET(request: NextRequest) {
       try {
         const research = await fetchCompanyResearch({
           ticker: symbol,
+          // Scoring reads the statements only — the 5-source cross-check is on
+          // the research page, where one company at a time is on screen.
+          verify: false,
           quote: quote
             ? {
                 price: quote.price,

@@ -16,6 +16,8 @@
 // own contact address. Everything is cached in-process (CIK map 1h, company
 // data 15m) so a page refresh does not re-download megabytes.
 
+import { verifyResearch, type ResearchVerification } from "./research-verify";
+
 const SEC_UA =
   process.env.SEC_USER_AGENT ||
   "Stockfolio research (local app; contact: stockfolio@example.com)";
@@ -91,7 +93,10 @@ const US_GAAP: Record<string, string[]> = {
   grossProfit: ["GrossProfit"],
   operatingIncome: ["OperatingIncomeLoss"],
   netIncome: ["NetIncomeLoss", "ProfitLoss"],
-  epsDiluted: ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted"],
+  // Basic is the last resort: some filers (Berkshire, for one) tag only
+  // `EarningsPerShareBasic` and state in the text that diluted equals basic.
+  // The statement builder adds a note when the basic tag supplied the figure.
+  epsDiluted: ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"],
   assets: ["Assets"],
   liabilities: ["Liabilities"],
   equity: [
@@ -132,7 +137,7 @@ const IFRS: Record<string, string[]> = {
   grossProfit: ["GrossProfit"],
   operatingIncome: ["ProfitLossFromOperatingActivities"],
   netIncome: ["ProfitLoss"],
-  epsDiluted: ["DilutedEarningsLossPerShare"],
+  epsDiluted: ["DilutedEarningsLossPerShare", "BasicEarningsLossPerShare"],
   assets: ["Assets"],
   liabilities: ["Liabilities"],
   equity: ["Equity", "EquityAttributableToOwnersOfParent"],
@@ -265,6 +270,13 @@ export interface ResearchProfile {
   address: string | null;
 }
 
+export interface PriceSourceCheck {
+  source: string;
+  ok: boolean;
+  price: number | null;
+  error?: string;
+}
+
 export interface ResearchFiling {
   form: string;
   filed: string;
@@ -273,8 +285,27 @@ export interface ResearchFiling {
   url: string;
 }
 
+export interface StatementOrigin {
+  /** CIK the statement tables were read from */
+  cik: string;
+  /** registrant name behind that CIK */
+  name: string;
+  /** true when this is not the registrant the ticker maps to */
+  predecessor: boolean;
+  /** why a different CIK was used, in plain words */
+  note: string | null;
+}
+
 export interface CompanyResearch {
   profile: ResearchProfile;
+  /** where the statements came from (a successor registrant may differ from the profile) */
+  statementsSource: StatementOrigin;
+  /** independent cross-read of the figures; null when verification was skipped */
+  verification: ResearchVerification | null;
+  /** the price sources behind the quote (null when the route did not supply them) */
+  priceSources: PriceSourceCheck[] | null;
+  /** how many price sources agreed and how far apart they were */
+  priceAgreement: { agreeing: number; spreadPct: number | null } | null;
   /** most recent fiscal year first */
   annual: AnnualRow[];
   ratios: RatioRow[];
@@ -550,9 +581,16 @@ export function extractAnnualSeries(
         if (!prev) {
           out.set(e.end, { value: e.val, tag, taxonomy: tax.name, filed, firstFiled: filed, fy });
         } else if (filed > prev.filed) {
-          // Restatement / amendment: newest filed value wins, but the fiscal
-          // year label stays with the FIRST report of that period.
-          out.set(e.end, { ...prev, value: e.val, tag, taxonomy: tax.name, filed });
+          // Restatement / amendment: the newest filing wins, but only from the
+          // SAME concept. A later filing of a lower-priority tag must not
+          // replace the higher-priority figure — Apple's FY2022 cash is 23.6bn
+          // on the balance sheet, while the restricted-cash series (the next
+          // tag in the chain) reports 25.0bn in the FY2023 10-K's comparative.
+          // Letting that overwrite relabelled the line and mixed two
+          // definitions across the row.
+          if (tag === prev.tag) {
+            out.set(e.end, { ...prev, value: e.val, tag, taxonomy: tax.name, filed });
+          }
         } else if (filed < prev.firstFiled) {
           // companyfacts lists facts in JSON order, not filing order — an
           // older 10-K seen later still owns the period's fiscal-year label.
@@ -625,6 +663,30 @@ const METRIC_SPECS: { key: MetricKey; label: string; unit: MetricUnit; instant: 
 
 const FY_PRIORITY: MetricKey[] = ["revenue", "netIncome", "operatingIncome", "assets", "equity"];
 
+// ─── Revenue completeness ──────────────────────────────────────────────────
+// The contract-revenue tags cover "revenue from contracts with customers" —
+// which for a conglomerate is only part of the income statement. Berkshire's
+// FY2025 10-K reports $247.2bn under that tag and $371.4bn of total revenues;
+// reading the first one alone understates revenue by a third. When the filer
+// also tags a total-revenue line for the SAME period and it is materially
+// larger, the total is what the income statement shows, so it wins — and the
+// swap is named in the notes rather than made silently.
+const CONTRACT_REVENUE_TAGS = new Set([
+  "RevenueFromContractWithCustomerExcludingAssessedTax",
+  "RevenueFromContractWithCustomerIncludingAssessedTax",
+  "RevenueFromContractsWithCustomers",
+]);
+const TOTAL_REVENUE_TAGS = ["Revenues", "SalesRevenueNet", "SalesRevenueGoodsNet"];
+/** material gap before the total-revenue line replaces the contract figure */
+const REVENUE_TOTAL_GAP = 0.02;
+
+export function formatMoneyShort(value: number, currency: string): string {
+  const abs = Math.abs(value);
+  const divisor = abs >= 1e9 ? 1e9 : abs >= 1e6 ? 1e6 : 1e3;
+  const suffix = divisor === 1e9 ? "bn" : divisor === 1e6 ? "m" : "k";
+  return `${currency} ${(value / divisor).toFixed(1)}${suffix}`;
+}
+
 /**
  * The fiscal-year label for a period comes from the income-statement facts
  * first (they are unambiguous), then the balance sheet. Max/min across all
@@ -646,6 +708,8 @@ function fiscalYearFor(picks: Map<MetricKey, Map<string, MetricPick>>, end: stri
 export interface StatementBuild {
   annual: AnnualRow[];
   tags: Partial<Record<MetricKey, string | null>>;
+  /** the concept behind each metric IN EACH PERIOD (filer tags change over time) */
+  periodTags: Partial<Record<MetricKey, Record<string, string>>>;
   notes: string[];
   /** ISO currency of the statement figures */
   currency: string;
@@ -751,10 +815,46 @@ export function buildAnnualStatements(
   }
 
   const notes: string[] = [];
+
+  // Replace a partial contract-revenue figure with the filer's total-revenue
+  // line for the same period, and say so. A period the total does not cover
+  // keeps the contract figure (never inferred from another year).
+  const revenuePicks = picks.get("revenue");
+  if (revenuePicks) {
+    const totals = extractAnnualSeries(facts, TOTAL_REVENUE_TAGS, [currency], false, taxonomy === "none" ? undefined : taxonomy);
+    for (const row of annual) {
+      const chosen = revenuePicks.get(row.end);
+      const total = totals.get(row.end);
+      if (!chosen || !total || !CONTRACT_REVENUE_TAGS.has(chosen.tag)) continue;
+      if (total.value <= chosen.value * (1 + REVENUE_TOTAL_GAP)) continue;
+      revenuePicks.set(row.end, total);
+      row.revenue = total.value;
+      notes.push(
+        `${formatMoneyShort(total.value, currency)} of total revenue is used for FY${row.fy}: the filer's contract-revenue tag covers only ` +
+          `${formatMoneyShort(chosen.value, currency)} of it (${total.tag} is the income-statement total).`
+      );
+    }
+    // The provenance map was built from the pre-override picks; re-read the
+    // newest period so the UI names the concept that actually supplied the
+    // figure on screen.
+    for (const row of annual) {
+      const hit = revenuePicks.get(row.end);
+      if (hit) {
+        tags.revenue = hit.tag;
+        break;
+      }
+    }
+  }
+
   for (const spec of METRIC_SPECS) {
     if (!annual.some((r) => r[spec.key] !== null)) {
       notes.push(`${spec.label}: not reported as an annual XBRL fact by this filer.`);
     }
+  }
+  if (tags.epsDiluted === "EarningsPerShareBasic" || tags.epsDiluted === "BasicEarningsLossPerShare") {
+    notes.push(
+      "EPS: this filer tags only BASIC EPS; no diluted per-share fact is filed, so the figure shown is the filed basic EPS."
+    );
   }
   if (annual.length > 0) {
     notes.push(
@@ -768,7 +868,16 @@ export function buildAnnualStatements(
     }
   }
 
-  return { annual, tags, notes, currency, taxonomy };
+  // Per-period provenance, taken AFTER the revenue swap: it is what the
+  // cross-source check re-reads, and a filer can change tag between years.
+  const periodTags: Partial<Record<MetricKey, Record<string, string>>> = {};
+  for (const [key, map] of picks) {
+    const byPeriod: Record<string, string> = {};
+    for (const [end, pick] of map) byPeriod[end] = pick.tag;
+    periodTags[key] = byPeriod;
+  }
+
+  return { annual, tags, periodTags, notes, currency, taxonomy };
 }
 
 // ─── Ratios ────────────────────────────────────────────────────────────────
@@ -983,19 +1092,134 @@ export async function fetchCompanyFacts(ticker: string): Promise<CompanyFacts | 
   return secFetch<CompanyFacts>(`https://data.sec.gov/api/xbrl/companyfacts/CIK${resolved.cik}.json`);
 }
 
+// ─── Successor registrants (a reorganisation moves the 10-Ks) ─────────────
+// A ticker can map to an entity that has filed no annual report yet while the
+// operating company's 10-Ks sit under an earlier CIK. In Nov 2026 XOM mapped
+// to ExxonMobil Holdings Corp (only 10-Qs so far) while Exxon Mobil Corp's
+// annual reports were under CIK 34088 — the page showed an empty statement set
+// for a mega-cap. EDGAR's company search lists the registrants filing annual
+// reports under a name, so the fallback finds the entity that actually has
+// them and the response says which CIK was used. It is a FALLBACK only: it
+// runs when the mapped registrant produced no annual rows, and a candidate is
+// accepted only when it shares the company's leading name token.
+
+const NAME_STOP_WORDS = new Set([
+  "THE", "AND", "HOLDINGS", "HOLDING", "GROUP", "CORP", "CORPORATION", "INC",
+  "INCORPORATED", "CO", "COMPANY", "LTD", "LIMITED", "PLC", "NV", "AG", "SE",
+]);
+
+interface RegistrantHit {
+  cik: string;
+  name: string;
+}
+
+function leadingNameKey(name: string): string {
+  const words = name
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !NAME_STOP_WORDS.has(w));
+  return (words[0] ?? "").slice(0, 5);
+}
+
+/** Registrants that filed `form` under a company name (EDGAR Atom search). */
+async function searchAnnualRegistrants(name: string, form: "10-K" | "20-F"): Promise<RegistrantHit[]> {
+  const key = leadingNameKey(name);
+  if (key.length < 3) return [];
+  const url =
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=" +
+    `${encodeURIComponent(key)}&type=${encodeURIComponent(form)}&dateb=&owner=include&count=40&output=atom`;
+  try {
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: { "User-Agent": SEC_UA, Accept: "application/atom+xml" },
+    });
+    if (!res.ok) return [];
+    const xml = await res.text();
+    // The Atom feed puts each matched company in its own <company-info> block
+    // (the <entry> elements are that company's filings and carry no CIK).
+    const blocks = xml.includes("<company-info>")
+      ? xml.split("<company-info>").slice(1)
+      : [xml];
+    const hits: RegistrantHit[] = [];
+    for (const block of blocks) {
+      const cik = block.match(/<cik>(\d+)<\/cik>/)?.[1];
+      const conformed = block.match(/<conformed-name>([^<]+)<\/conformed-name>/)?.[1];
+      if (!cik || !conformed) continue;
+      // The name must carry the same leading token: a name search is fuzzy and
+      // picking a different company would be worse than an empty page.
+      if (!conformed.toUpperCase().replace(/[^A-Z0-9 ]/g, " ").includes(key)) continue;
+      hits.push({ cik: cik.padStart(10, "0"), name: conformed });
+    }
+    const seen = new Set<string>();
+    return hits.filter((h) => (seen.has(h.cik) ? false : (seen.add(h.cik), true))).slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Find the registrant whose annual filings back a company name. Returns null
+ * when nothing better exists — the caller then reports the empty statement set
+ * instead of inventing one.
+ */
+async function findStatementRegistrant(
+  name: string,
+  skipCik: string
+): Promise<{ facts: CompanyFacts; cik: string; name: string; build: StatementBuild } | null> {
+  const candidates = [
+    ...(await searchAnnualRegistrants(name, "10-K")),
+    ...(await searchAnnualRegistrants(name, "20-F")),
+  ].filter((c) => c.cik !== skipCik);
+
+  const loaded = await Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        const facts = await secFetch<CompanyFacts>(
+          `https://data.sec.gov/api/xbrl/companyfacts/CIK${candidate.cik}.json`
+        );
+        const build = buildAnnualStatements(facts);
+        return build.annual.length > 0 ? { ...candidate, facts, build } : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+  const usable = loaded.filter((x): x is NonNullable<typeof x> => x !== null);
+  if (usable.length === 0) return null;
+  // Newest annual period wins: that is the entity whose statements are current.
+  usable.sort((a, b) => (a.build.annual[0].end < b.build.annual[0].end ? 1 : -1));
+  return usable[0];
+}
+
 export interface ResearchInput {
   ticker: string;
   /** injected in tests so no network is touched */
   quote?: { price: number | null; previousClose: number | null; changePercent: number | null; dayHigh: number | null; dayLow: number | null; marketState: string | null; tradeTime: number | null; source: string | null } | null;
   quoteError?: string | null;
+  /** every price source that answered, so the page can show the price check too */
+  priceSources?: PriceSourceCheck[] | null;
+  priceAgreement?: { agreeing: number; spreadPct: number | null } | null;
+  /** false skips the cross-source read (used for peer tables: 4 peers × 5 sources would be a lot) */
+  verify?: boolean;
 }
 
 export async function fetchCompanyResearch(input: ResearchInput): Promise<CompanyResearch> {
   const ticker = input.ticker.trim().toUpperCase();
   if (!ticker) throw new Error("ticker is required");
 
+  // A cached entry built with `verify: false` (peer table, scoring route) has no
+  // cross-source read: serve it to another unverified caller, but never to the
+  // research page, which would then show a company with no check for 15 min.
+  const wantsVerification = input.verify !== false;
   const cached = companyCache.get(ticker);
-  if (cached && Date.now() - cached.at < COMPANY_TTL_MS) return cached.data;
+  if (
+    cached &&
+    Date.now() - cached.at < COMPANY_TTL_MS &&
+    (!wantsVerification || cached.data.verification !== null)
+  ) {
+    return cached.data;
+  }
 
   const resolved = await resolveCik(ticker);
   if (!resolved) {
@@ -1009,9 +1233,36 @@ export async function fetchCompanyResearch(input: ResearchInput): Promise<Compan
     secFetch<CompanyFacts>(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`),
   ]);
 
-  const { annual, tags, notes, currency, taxonomy } = buildAnnualStatements(facts);
+  // Statements normally come from the registrant the ticker maps to. If that
+  // entity has filed no annual report yet (a successor holdco), fall back to
+  // the registrant that does — and say so, with both names.
+  let statements = buildAnnualStatements(facts);
+  let statementFacts = facts;
+  let origin: StatementOrigin = {
+    cik,
+    name: sub.name ?? resolved.title,
+    predecessor: false,
+    note: null,
+  };
+  if (statements.annual.length === 0) {
+    const alt = await findStatementRegistrant(sub.name ?? resolved.title, cik);
+    if (alt) {
+      statements = alt.build;
+      statementFacts = alt.facts;
+      const covers = alt.build.annual[0].end;
+      origin = {
+        cik: alt.cik,
+        name: alt.name,
+        predecessor: true,
+        note:
+          `Ticker ${ticker} maps to CIK ${cik} (${sub.name ?? resolved.title}), which has filed no annual report yet. ` +
+          `The statements below are read from CIK ${alt.cik} (${alt.name}), the registrant whose annual report runs to ${covers}.`,
+      };
+    }
+  }
+  const { annual, tags, periodTags, notes, currency, taxonomy } = statements;
   const ratios = computeRatios(annual);
-  const shares = latestShares(facts, annual);
+  const shares = latestShares(statementFacts, annual);
   const quote = input.quote ?? null;
 
   // Non-USD reporters need a conversion before their earnings can be compared
@@ -1033,6 +1284,7 @@ export async function fetchCompanyResearch(input: ResearchInput): Promise<Compan
       : null;
 
   const allNotes = [...notes];
+  if (origin.note) allNotes.push(origin.note);
   if (currency !== "USD") {
     allNotes.push(
       fx
@@ -1056,8 +1308,64 @@ export async function fetchCompanyResearch(input: ResearchInput): Promise<Compan
     "Multiples use the latest FILED fiscal year (not TTM) against the current price, so they are a point-in-time comparison, not a forecast."
   );
 
+  // Cross-source read of the same figures (SEC concept, SEC frames, Nasdaq,
+  // Yahoo). It never throws and never changes a number — it reports agreement.
+  let verification: ResearchVerification | null = null;
+  if (input.verify !== false) {
+    try {
+      verification = await verifyResearch({
+        ticker,
+        cik: origin.cik,
+        currency,
+        taxonomy,
+        annual: annual.map((row) => ({
+          fy: row.fy,
+          end: row.end,
+          tags: {
+            revenue: periodTags.revenue?.[row.end],
+            grossProfit: periodTags.grossProfit?.[row.end],
+            operatingIncome: periodTags.operatingIncome?.[row.end],
+            netIncome: periodTags.netIncome?.[row.end],
+            epsDiluted: periodTags.epsDiluted?.[row.end],
+            assets: periodTags.assets?.[row.end],
+            liabilities: periodTags.liabilities?.[row.end],
+            equity: periodTags.equity?.[row.end],
+            cash: periodTags.cash?.[row.end],
+            operatingCashFlow: periodTags.operatingCashFlow?.[row.end],
+            capex: periodTags.capex?.[row.end],
+          },
+          values: {
+            revenue: row.revenue,
+            grossProfit: row.grossProfit,
+            operatingIncome: row.operatingIncome,
+            netIncome: row.netIncome,
+            epsDiluted: row.epsDiluted,
+            assets: row.assets,
+            liabilities: row.liabilities,
+            equity: row.equity,
+            cash: row.cash,
+            operatingCashFlow: row.operatingCashFlow,
+            capex: row.capex,
+          },
+        })),
+      });
+    } catch (e) {
+      verification = {
+        checkedAt: new Date().toISOString(),
+        sources: [],
+        figures: [],
+        summary: { figures: 0, verified: 0, conflicts: 0, singleSource: 0, notReported: 0, sources: 0, sourcesOk: 0 },
+        note: `Cross-source check failed: ${e instanceof Error ? e.message : "unknown error"}`,
+      };
+    }
+  }
+
   const data: CompanyResearch = {
     profile: buildProfile(sub, cik, ticker),
+    statementsSource: origin,
+    verification,
+    priceSources: input.priceSources ?? null,
+    priceAgreement: input.priceAgreement ?? null,
     annual,
     ratios,
     valuation,
@@ -1072,7 +1380,9 @@ export async function fetchCompanyResearch(input: ResearchInput): Promise<Compan
     source: {
       tickerMap: "https://www.sec.gov/files/company_tickers.json",
       submissions: `https://data.sec.gov/submissions/CIK${cik}.json`,
-      facts: `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`,
+      // The CIK the statement tables were actually read from (see
+      // statementsSource): for a successor registrant it is not the ticker's.
+      facts: `https://data.sec.gov/api/xbrl/companyfacts/CIK${origin.cik}.json`,
       secUserAgent: SEC_UA,
     },
     fetchedAt: new Date().toISOString(),

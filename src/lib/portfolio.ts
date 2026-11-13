@@ -13,7 +13,14 @@ import type { Trade } from "./db";
 export interface Lot {
   symbol: string;
   shares: number;
-  price: number;      // per-share cost
+  price: number;      // per-share execution price
+  /**
+   * The buy fee spread over the lot's shares. A partial sell must carry its own
+   * share of the fee, otherwise the fee sits with the SHARES LEFT BEHIND and the
+   * realized P&L of the sold ones is reported gross of it (the tab says "net of
+   * fees").
+   */
+  feePerShare: number;
   date: string;
   remaining: number;
 }
@@ -51,6 +58,10 @@ export interface PortfolioSnapshot {
     dividends: number;
     fees: number;
     equity: number;          // marketValue + cashBalance
+    /** Open positions with no usable quote: their marketValue is COST, not a price. */
+    unpricedCount: number;
+    /** How much of marketValue is that cost placeholder (0 when every quote arrived). */
+    unpricedValue: number;
     invested: number;        // deposits - withdrawals
     totalReturn: number;     // equity - invested
     totalReturnPct: number;
@@ -98,6 +109,7 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
         const lots = lotMap.get(t.symbol) ?? [];
         lots.push({
           symbol: t.symbol, shares: t.shares, price: t.price,
+          feePerShare: t.shares > 0 ? fees / t.shares : 0,
           date: t.date, remaining: t.shares,
         });
         lotMap.set(t.symbol, lots);
@@ -120,7 +132,8 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
           if (remaining <= 0) break;
           const take = Math.min(lot.remaining, remaining);
           if (take > 0) {
-            matchedCost += take * lot.price;
+            // Includes the lot's buy fee, so realized is net of BOTH sides.
+            matchedCost += take * (lot.price + lot.feePerShare);
             matchedShares += take;
             lot.remaining -= take;
             remaining -= take;
@@ -137,9 +150,15 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
           cash.realized += realized;
           p.shares -= matchedShares;
           p.costBasis -= matchedCost;
-          p.avgCost = p.shares > 0 ? p.costBasis / p.shares : 0;
+          // A fully-exited position keeps no residue from per-share fee rounding.
+          if (p.shares <= 0) {
+            p.shares = Math.max(0, p.shares);
+            p.costBasis = 0;
+            p.avgCost = 0;
+          } else {
+            p.avgCost = p.costBasis / p.shares;
+          }
           cash.fees += t.fees ?? 0;
-          if (p.shares < 0) p.shares = 0;
         }
         break;
       }
@@ -165,6 +184,8 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
     dividends: cash.dividends,
     fees: cash.fees,
     equity: 0,            // filled by caller
+    unpricedCount: 0,     // filled by caller
+    unpricedValue: 0,     // filled by caller
     invested: cash.deposits - cash.withdrawals,
     totalReturn: 0,       // filled by caller
     totalReturnPct: 0,    // filled by caller
@@ -176,6 +197,12 @@ export function buildPortfolio(trades: Trade[]): PortfolioSnapshot {
 
 // ─── Live enrichment ────────────────────────────────────────────
 export interface QuotedPosition extends Position {
+  /**
+   * False when the quote feed gave no usable price. `marketValue` is then the
+   * position's COST (so equity and returns stay defined), which must never be
+   * shown as a market price — the pages label it "at cost".
+   */
+  priced: boolean;
   lastPrice: number | null;
   prevClose: number | null;
   bid: number | null;
@@ -195,14 +222,21 @@ export interface QuotedPosition extends Position {
 export interface EnrichedPortfolio {
   snapshot: PortfolioSnapshot;
   quoted: QuotedPosition[];
-  quotes: Record<string, { price: number; change: number; changePercent: number; name: string | null; currency: string }>;
+  quotes: Record<string, {
+    price: number;
+    /** null when the feed reported no previous close (e.g. Stooq) — never invented. */
+    change: number | null;
+    changePercent: number | null;
+    name: string | null;
+    currency: string;
+  }>;
   errors: Record<string, string>;
 }
 
 export function enrichWithQuotes(
   snapshot: PortfolioSnapshot,
   quotes: Record<string, {
-    price: number; change: number; changePercent: number; previousClose?: number | null;
+    price: number; change: number | null; changePercent: number | null; previousClose?: number | null;
     name: string | null; currency: string;
     bid?: number | null; ask?: number | null; bidSize?: number | null; askSize?: number | null;
     spreadPct?: number | null; bookSource?: string | null;
@@ -211,12 +245,17 @@ export function enrichWithQuotes(
 ): EnrichedPortfolio {
   const quoted: QuotedPosition[] = snapshot.positions.map((p) => {
     const q = quotes[p.symbol];
-    const lastPrice = q?.price ?? null;
+    // A price of 0 (or a non-finite one) is not a price: it would mark the whole
+    // position down to zero and report a −100 % loss. Treat it as no quote.
+    const raw = q?.price ?? null;
+    const priced = raw != null && Number.isFinite(raw) && raw > 0;
+    const lastPrice = priced ? raw : null;
     const prevClose = q?.previousClose ?? null;
-    const marketValue = lastPrice != null ? p.shares * lastPrice : p.costBasis; // fallback to cost
-    const unrealized = lastPrice != null ? marketValue - p.costBasis : 0;
+    const marketValue = priced ? p.shares * (lastPrice as number) : p.costBasis;
+    const unrealized = priced ? marketValue - p.costBasis : 0;
     return {
       ...p,
+      priced,
       lastPrice,
       prevClose,
       bid: q?.bid ?? null,
@@ -228,25 +267,34 @@ export function enrichWithQuotes(
       marketValue,
       unrealized,
       unrealizedPct: p.costBasis > 0 ? (unrealized / p.costBasis) * 100 : 0,
-      dayChange: q ? (q.change ?? 0) * p.shares : 0,
-      dayChangePct: q?.changePercent ?? 0,
+      dayChange: priced && q ? (q.change ?? 0) * p.shares : 0,
+      dayChangePct: priced ? (q?.changePercent ?? 0) : 0,
       weightPct: 0, // filled below
     };
   });
-
-  const totalMv = quoted.reduce((s, p) => s + p.marketValue, 0);
-  for (const p of quoted) {
-    p.weightPct = totalMv > 0 ? (p.marketValue / totalMv) * 100 : 0;
-  }
 
   const marketValue = quoted.reduce((s, p) => s + p.marketValue, 0);
   const dayChange = quoted.reduce((s, p) => s + p.dayChange, 0);
   const equity = marketValue + snapshot.cashBalance;
   const invested = snapshot.totals.invested;
 
+  // Weight is the share of the WHOLE portfolio, cash included — the same unit the
+  // allocation donut uses. Dividing by positions only made every row read larger
+  // than its slice (and the column added to 100 % next to a donut with cash in
+  // it). Equity of zero or less (an all-cash or overdrawn book) falls back to the
+  // invested positions so the column still means something.
+  const weightDenom = equity > 0 ? equity : marketValue;
+  for (const p of quoted) {
+    p.weightPct = weightDenom > 0 ? (p.marketValue / weightDenom) * 100 : 0;
+  }
+
+  const unpriced = quoted.filter((p) => !p.priced);
+
   snapshot.totals.marketValue = marketValue;
   snapshot.totals.unrealized = quoted.reduce((s, p) => s + p.unrealized, 0);
   snapshot.totals.equity = equity;
+  snapshot.totals.unpricedCount = unpriced.length;
+  snapshot.totals.unpricedValue = unpriced.reduce((s, p) => s + p.costBasis, 0);
   snapshot.totals.totalReturn = equity - invested;
   snapshot.totals.totalReturnPct = invested > 0 ? ((equity - invested) / invested) * 100 : 0;
   snapshot.totals.dayChange = dayChange;

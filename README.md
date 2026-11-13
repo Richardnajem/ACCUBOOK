@@ -10,6 +10,12 @@ leaves your machine.
 ### Portfolio Tracking
 - **Holdings** — live positions with FIFO cost-basis lots, average cost, market value,
   unrealized/realized P&L, dividends received, and portfolio weight per symbol.
+  Realized P&L is net of **both** sides' fees (each lot carries its buy fee per
+  share), so it reconciles with the cash ledger:
+  `realized + unrealized + dividends − standalone fees = total return`. Weight is
+  the share of total equity, cash included — the same unit as the allocation
+  donut. A position whose quote failed is shown **at cost** and left out of the
+  day change and unrealized P&L, never marked to $0.
 - **Trade Log** — record buys, sells, dividends, deposits, withdrawals, and fees.
   Full edit/delete with undo/redo (Ctrl+Z / Ctrl+Shift+Z).
 - **Cash Ledger** — deposits and withdrawals tracked automatically; cash balance feeds
@@ -63,12 +69,33 @@ leaves your machine.
 - **Foreign filers** — IFRS reporters (e.g. 20-F in DKK/EUR) keep their own currency;
   a real USD FX rate converts price and net debt so the multiples are comparable.
 - **Filings** — recent 10-K/10-Q/8-K/20-F/40-F/6-K with direct SEC EDGAR links.
+- **Cross-source check** — every annual figure is re-read from **four other
+  places** — the SEC company-concept endpoint (the raw series for the tag that was
+  chosen), the SEC period frame (every filer's value for that period, matched by
+  CIK), Nasdaq and Yahoo Finance — plus the five quote sources behind the price.
+  Each figure is labelled **verified**, **in conflict** (both values shown) or
+  **single-source**; a source that fails is listed with its error and never counts
+  as agreement. Nothing is averaged or silently corrected. A source reporting in
+  another currency (Nasdaq files ASML in USD over EUR statements) is shown as not
+  comparable with the factor, instead of manufacturing ten false conflicts.
+- **Revenue is the filer's total** — where a company also tags a total-revenue line
+  and its contract-revenue tag covers only part of the business (Berkshire: $247.2bn
+  of $371.4bn), the income-statement total is used and the swap is named in the notes.
+- **Successor registrants** — when a ticker maps to an entity that has not filed an
+  annual report yet (XOM → ExxonMobil Holdings Corp, 10-Qs only), the statements are
+  read from the CIK that does file them and the page says which, with both names.
 - **Honest coverage** — anything the filer did not report is shown as “—” and named
   in the coverage notes; analyst estimates and ratings are not in the SEC dataset and
   are not fabricated.
 
   Set `SEC_USER_AGENT` to a string with your contact address (SEC's fair-access
   policy) before using this in production.
+
+  The accuracy harness is opt-in because it needs the network:
+
+  ```bash
+  npm run test:research   # prints per-company figures, source health and every conflict
+  ```
 
 ### Backtesting
 - **Famous strategies** — SMA/EMA crossovers, RSI mean reversion, MACD, Bollinger,
@@ -174,7 +201,7 @@ leaves your machine.
 - **Price History tab** — pick a ticker and a range (1M → Max) to chart the close, read
   every session in a sortable-by-date table (open/high/low/close, change vs the
   previous close, volume), and see the window's change, high/low, trailing 52-week
-  band, session count and average volume. **Export CSV** writes the loaded window;
+  band, session count and mean volume over the loaded window. **Export CSV** writes the loaded window;
   **Export Excel (all days + indicators)** writes the same full-history workbook the
   Mega Indicator button produces, at the app's default weights. Weekends and holidays
   have no bar because there was no session, and nothing is forward-filled.
@@ -622,6 +649,7 @@ src/
     mega-history.ts       # Cached score-over-time (SQLite)
     mega-prefs.ts         # Bridges saved Mega Indicator weights into the backtest
     research.ts           # SEC EDGAR fundamentals, ratios, FX and valuation
+    research-verify.ts    # 5-source cross-check of the same annual figures
 ```
 
 ## Database

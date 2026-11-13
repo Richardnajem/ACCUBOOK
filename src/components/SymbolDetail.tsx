@@ -35,6 +35,8 @@ export interface SymbolMeta {
   realized?: number;
   dividends?: number;
   weightPct?: number;
+  /** false = no usable quote, so marketValue is the position's COST */
+  priced?: boolean;
   firstBuyDate?: string | null;
   // Quote
   lastPrice?: number | null;
@@ -152,7 +154,7 @@ export default function SymbolDetail({
       { label: "Shares", value: num(meta.shares) },
       { label: "Avg cost", value: money(meta.avgCost) },
       { label: "Cost basis", value: money(meta.costBasis) },
-      { label: "Market value", value: money(meta.marketValue) },
+      { label: meta.priced === false ? "Market value (at cost)" : "Market value", value: money(meta.marketValue) },
     ];
     if (meta.unrealized != null)
       rows.push({
@@ -160,7 +162,7 @@ export default function SymbolDetail({
         value: `${signedMoney(meta.unrealized)} (${pct(meta.unrealizedPct)})`,
         tone: toneOf(meta.unrealized),
       });
-    if (meta.weightPct != null) rows.push({ label: "Portfolio weight", value: `${meta.weightPct.toFixed(1)}%` });
+    if (meta.weightPct != null) rows.push({ label: "Weight of equity", value: `${meta.weightPct.toFixed(1)}%`, tone: "muted" });
     if (meta.firstBuyDate) rows.push({ label: "First buy", value: meta.firstBuyDate, tone: "muted" });
     sections.push({ heading: "Position", rows });
   }

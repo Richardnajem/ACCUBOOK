@@ -54,19 +54,21 @@ async function stooqFallback(sym: string): Promise<LiveQuote> {
   const cols = lines[1].split(",");
   // Symbol,Date,Time,Open,High,Low,Close,Volume
   const close = parseFloat(cols[6]);
-  const open = parseFloat(cols[3]);
   const high = parseFloat(cols[4]);
   const low = parseFloat(cols[5]);
   if (!Number.isFinite(close) || close <= 0) throw new Error(`No Stooq quote for "${sym}".`);
+  // Stooq's OHLC row has no PREVIOUS close — `open` is today's open. Reporting it
+  // as previousClose made the day change read open→close while every label says
+  // "vs yesterday's close". Say unknown instead.
   const quote: LiveQuote = {
     symbol: sym,
     name: null,
     currency: "USD",
     exchange: "Stooq",
     price: close,
-    previousClose: Number.isFinite(open) ? open : null,
-    change: Number.isFinite(open) ? close - open : null,
-    changePercent: Number.isFinite(open) && open !== 0 ? ((close - open) / open) * 100 : null,
+    previousClose: null,
+    change: null,
+    changePercent: null,
     dayHigh: Number.isFinite(high) ? high : null,
     dayLow: Number.isFinite(low) ? low : null,
     yearHigh: null,

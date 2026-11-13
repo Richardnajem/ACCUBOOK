@@ -330,7 +330,11 @@ export default function PriceHistoryPage() {
               String(summary.bars),
               summary.spanYears == null ? undefined : `${summary.spanYears.toFixed(1)} years · ${summary.upDays} up / ${summary.downDays} down`,
             )}
-            {kpi("Average volume", fmtVolume(summary.avgVolume), data.source === "yahoo" ? "Fetched from Yahoo" : "Local price cache")}
+            {kpi(
+              "Avg volume (window)",
+              fmtVolume(summary.avgVolume),
+              `Mean of the ${summary.bars} loaded sessions · ${data.source === "yahoo" ? "Yahoo" : "local cache"}`,
+            )}
           </div>
 
           {/* ─── Chart ─────────────────────────────────────────── */}

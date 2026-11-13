@@ -68,7 +68,7 @@ export default function HoldingsPage() {
     symbol: p.symbol,
     name: data?.quotes[p.symbol]?.name ?? null,
     held: p.shares > 0,
-    shares: p.shares, avgCost: p.avgCost, costBasis: p.costBasis, marketValue: p.marketValue,
+    shares: p.shares, avgCost: p.avgCost, costBasis: p.costBasis, marketValue: p.marketValue, priced: p.priced,
     unrealized: p.unrealized, unrealizedPct: p.unrealizedPct,
     realized: p.realized, dividends: p.dividends, weightPct: p.weightPct, firstBuyDate: p.firstBuyDate,
     lastPrice: p.lastPrice, prevClose: p.prevClose, dayChange: p.dayChange, dayChangePct: p.dayChangePct,
@@ -140,26 +140,44 @@ export default function HoldingsPage() {
     },
     { key: "avgCost", header: "Avg Cost", align: "right", render: (r) => fmt(r.avgCost) },
     { key: "costBasis", header: "Cost Basis", align: "right", render: (r) => fmt(r.costBasis) },
-    { key: "marketValue", header: "Market Value", align: "right", render: (r) => fmt(r.marketValue) },
+    {
+      key: "marketValue", header: "Market Value", align: "right",
+      // No quote = the figure is the position's COST, so say so instead of
+      // letting it pass as a market price.
+      render: (r) =>
+        r.priced ? (
+          fmt(r.marketValue)
+        ) : (
+          <span className="text-[var(--muted)]" title="No live quote — valued at cost">
+            {fmt(r.marketValue)} <span className="text-[10px]">at cost</span>
+          </span>
+        ),
+    },
     {
       key: "dayChangePct", header: "Day", align: "right",
-      render: (r) => (
-        <span className={r.dayChangePct >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
-          {pct(r.dayChangePct)}
-        </span>
-      ),
+      render: (r) =>
+        r.priced ? (
+          <span className={r.dayChangePct >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
+            {pct(r.dayChangePct)}
+          </span>
+        ) : (
+          <span className="text-[var(--muted)]">—</span>
+        ),
     },
     {
       key: "unrealized", header: "Unrealized P&L", align: "right",
-      render: (r) => (
-        <span className={r.unrealized >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
-          {fmt(r.unrealized)} <span className="text-xs">({pct(r.unrealizedPct)})</span>
-        </span>
-      ),
+      render: (r) =>
+        r.priced ? (
+          <span className={r.unrealized >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}>
+            {fmt(r.unrealized)} <span className="text-xs">({pct(r.unrealizedPct)})</span>
+          </span>
+        ) : (
+          <span className="text-[var(--muted)]" title="Needs a live quote">—</span>
+        ),
     },
     { key: "realized", header: "Realized", align: "right", render: (r) => fmt(r.realized) },
     { key: "dividends", header: "Dividends", align: "right", render: (r) => fmt(r.dividends) },
-    { key: "weightPct", header: "Weight", align: "right", render: (r) => `${r.weightPct.toFixed(1)}%` },
+    { key: "weightPct", header: "Weight", align: "right", render: (r) => <span title="Share of total equity (cash included)">{r.weightPct.toFixed(1)}%</span> },
     { key: "details", header: "", sortable: false, align: "right", render: () => <span className="text-[var(--muted)] text-xs whitespace-nowrap">Details ›</span> },
   ];
 
@@ -218,6 +236,12 @@ export default function HoldingsPage() {
       {errorEntries.length > 0 && (
         <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-xs">
           Quote errors: {errorEntries.map(([sym, err]) => `${sym} — ${err}`).join("; ")}
+          {(totals?.unpricedCount ?? 0) > 0 && (
+            <span className="block mt-1">
+              {totals?.unpricedCount} holding(s) totalling {fmt(totals?.unpricedValue ?? 0)} are valued at cost, not at a
+              market price; they are excluded from the day change and unrealized P&L.
+            </span>
+          )}
         </div>
       )}
 
@@ -251,7 +275,7 @@ export default function HoldingsPage() {
                 { heading: "By position", rows: positions.map((p) => ({ label: `${p.symbol} (${pct(p.dayChangePct)})`, value: fmt(p.dayChange), tone: toneOf(p.dayChange) })) },
                 { heading: "Total", rows: [{ label: "Day change", value: fmt(totals?.dayChange ?? 0), tone: toneOf(totals?.dayChange ?? 0) }] },
               ]))}
-            {kpi("Unrealized P&L", fmt(totals?.unrealized ?? 0), undefined, (totals?.unrealized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
+            {kpi("Unrealized P&L", fmt(totals?.unrealized ?? 0), (totals?.unpricedCount ?? 0) > 0 ? `${totals?.unpricedCount} holding(s) at cost — no quote` : undefined, (totals?.unrealized ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]", () =>
               openMetric("Unrealized P&L", "Market value − cost basis, per holding", [
                 { heading: "By position", rows: positions.map((p) => ({ label: `${p.symbol} (${pct(p.unrealizedPct)})`, value: fmt(p.unrealized), tone: toneOf(p.unrealized) })) },
                 { heading: "Total", rows: [{ label: "Unrealized", value: fmt(totals?.unrealized ?? 0), tone: toneOf(totals?.unrealized ?? 0) }] },

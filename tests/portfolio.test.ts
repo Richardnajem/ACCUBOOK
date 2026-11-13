@@ -67,6 +67,46 @@ describe("buildPortfolio: buys and FIFO sells", () => {
     expect(snap.closedPositions[0].realized).toBeCloseTo(75, 10); // 600 - 25 - 500
   });
 
+  it("realized P&L also carries the buy fee of the shares sold", () => {
+    // 20 @ 100 with a 10 fee = 5/share of fee. Selling 5 @ 120 (2 fee) realizes
+    // 600 - 2 - (500 + 2.50) = 95.50 — not 98, which would have left the whole
+    // buy fee with the 15 shares still held.
+    const snap = buildPortfolio([
+      trade({ type: "buy", symbol: "AMD", shares: 20, price: 100, fees: 10 }),
+      trade({ type: "sell", symbol: "AMD", shares: 5, price: 120, fees: 2 }),
+    ]);
+    expect(snap.positions[0].realized).toBeCloseTo(95.5, 10);
+    expect(snap.positions[0].shares).toBe(15);
+    // The remaining lot still holds its own 7.50 of the buy fee.
+    expect(snap.positions[0].costBasis).toBeCloseTo(1507.5, 10);
+    expect(snap.positions[0].avgCost).toBeCloseTo(100.5, 10);
+    expect(snap.cash.fees).toBeCloseTo(12, 10);
+  });
+
+  it("keeps avg cost stable across partial sells (fee allocated per share)", () => {
+    const snap = buildPortfolio([
+      trade({ type: "buy", symbol: "KO", shares: 25, price: 60, fees: 1 }),
+      trade({ type: "sell", symbol: "KO", shares: 7, price: 70, fees: 1 }),
+      trade({ type: "sell", symbol: "KO", shares: 3, price: 80, fees: 1 }),
+    ]);
+    const p = snap.positions[0];
+    expect(p.shares).toBe(15);
+    expect(p.avgCost).toBeCloseTo(60.04, 10);
+    expect(p.costBasis).toBeCloseTo(15 * 60.04, 10);
+  });
+
+  it("an empty lot leaves no cost residue behind", () => {
+    const snap = buildPortfolio([
+      trade({ type: "buy", symbol: "GLD", shares: 3, price: 100, fees: 1 }),
+      trade({ type: "sell", symbol: "GLD", shares: 3, price: 110, fees: 1 }),
+    ]);
+    const p = snap.closedPositions[0];
+    expect(p.shares).toBe(0);
+    expect(p.costBasis).toBe(0);
+    expect(p.avgCost).toBe(0);
+    expect(p.realized).toBeCloseTo(28, 10); // 330 - 1 sell fee - 300 - 1 buy fee
+  });
+
   it("ignores oversells beyond held shares (resilient replay)", () => {
     const snap = buildPortfolio([
       trade({ type: "buy", symbol: "NVDA", shares: 5, price: 100 }),
@@ -111,6 +151,44 @@ describe("buildPortfolio: cash ledger", () => {
     expect(snap.cashBalance).toBeCloseTo(10_190, 10);
   });
 
+  it("realized + unrealized + dividends equals the total return (fees included)", () => {
+    // The identity the three P&L figures have to satisfy. Before buy fees were
+    // allocated to the sold shares, realized came out gross of them and this
+    // failed by exactly those fees.
+    const snap = enrichWithQuotes(
+      buildPortfolio([
+        trade({ type: "deposit", symbol: null, price: 50_000, date: "2024-01-01" }),
+        trade({ type: "buy", symbol: "AAPL", shares: 100, price: 150, fees: 7, date: "2024-01-02" }),
+        trade({ type: "buy", symbol: "MSFT", shares: 20, price: 300, fees: 5, date: "2024-02-01" }),
+        trade({ type: "sell", symbol: "AAPL", shares: 40, price: 190, fees: 6, date: "2024-03-01" }),
+        trade({ type: "dividend", symbol: "MSFT", price: 22, date: "2024-04-01" }),
+      ]),
+      {
+        AAPL: { price: 200, change: 1, changePercent: 0.5, name: null, currency: "USD" },
+        MSFT: { price: 320, change: -2, changePercent: -0.6, name: null, currency: "USD" },
+      },
+    ).snapshot;
+    const t = snap.totals;
+    expect(t.realized + t.unrealized + t.dividends).toBeCloseTo(t.totalReturn, 6);
+  });
+
+  it("a standalone fee is the only thing between the P&L parts and total return", () => {
+    // Trade fees live inside realized/unrealized; a cash `fee` event does not, so
+    // it is the one line that makes the three parts add up short of the total.
+    const snap = enrichWithQuotes(
+      buildPortfolio([
+        trade({ type: "deposit", price: 10_000, date: "2024-01-01" }),
+        trade({ type: "buy", symbol: "SPY", shares: 10, price: 100, fees: 4, date: "2024-01-02" }),
+        trade({ type: "sell", symbol: "SPY", shares: 4, price: 120, fees: 2, date: "2024-02-01" }),
+        trade({ type: "dividend", symbol: "SPY", price: 5, date: "2024-03-01" }),
+        trade({ type: "fee", price: 3, date: "2024-04-01" }),
+      ]),
+      { SPY: { price: 130, change: 0, changePercent: 0, name: null, currency: "USD" } },
+    ).snapshot;
+    const t = snap.totals;
+    expect(t.realized + t.unrealized + t.dividends - 3).toBeCloseTo(t.totalReturn, 6);
+  });
+
   it("attributes dividends per symbol and to cash", () => {
     const snap = buildPortfolio([
       trade({ type: "dividend", symbol: "SPY", price: 78.6 }),
@@ -141,10 +219,12 @@ describe("enrichWithQuotes", () => {
     expect(aapl.unrealized).toBe(500);
     expect(aapl.unrealizedPct).toBeCloseTo(50, 10);
     expect(msft.unrealized).toBe(-100);
-    // weights: 1500/2900 and 800/2900 (cost fallback 1000 for the unquoted? no — both quoted)
-    // AAPL mv 1500, MSFT mv 900 → total 2400
-    expect(aapl.weightPct).toBeCloseTo((1500 / 2400) * 100, 6);
-    expect(aapl.weightPct + msft.weightPct).toBeCloseTo(100, 6);
+    // Weight is the share of TOTAL EQUITY (cash included) — same unit as the
+    // allocation donut: mv 2400, cash 8000, equity 10400.
+    expect(aapl.weightPct).toBeCloseTo((1500 / 10_400) * 100, 6);
+    expect(msft.weightPct).toBeCloseTo((900 / 10_400) * 100, 6);
+    const cashShare = (8_000 / 10_400) * 100;
+    expect(aapl.weightPct + msft.weightPct + cashShare).toBeCloseTo(100, 6);
     expect(snapshot.totals.marketValue).toBe(2400);
     expect(snapshot.totals.unrealized).toBe(400);
     // cash: 10000 - (10*100) - (5*200) = 8000; equity = 2400 + 8000
@@ -163,15 +243,37 @@ describe("enrichWithQuotes", () => {
     expect(snapshot.totals.dayChange).toBeCloseTo(15, 10);
   });
 
-  it("falls back to cost basis when a quote is missing", () => {
+  it("values an unquoted position at cost but marks it unpriced", () => {
     const { snapshot, quoted } = enrichWithQuotes(base(), {
       AAPL: { price: 150, change: 0, changePercent: 0, name: null, currency: "USD" },
     });
     const msft = quoted.find((p) => p.symbol === "MSFT")!;
+    expect(msft.priced).toBe(false);
     expect(msft.lastPrice).toBeNull();
-    expect(msft.marketValue).toBe(1000); // cost fallback
+    expect(msft.marketValue).toBe(1000); // cost placeholder, labelled "at cost"
     expect(msft.unrealized).toBe(0);
+    expect(msft.dayChange).toBe(0);
     expect(snapshot.totals.marketValue).toBe(2500);
+    expect(snapshot.totals.unpricedCount).toBe(1);
+    expect(snapshot.totals.unpricedValue).toBe(1000);
+  });
+
+  it("never treats a zero or non-finite quote price as a market price", () => {
+    // A feed that answers with 0 used to value the position at $0 and report a
+    // −100 % loss as if it were real.
+    const { snapshot, quoted } = enrichWithQuotes(base(), {
+      AAPL: { price: 0, change: 0, changePercent: 0, name: null, currency: "USD" },
+      MSFT: { price: Number.NaN, change: 0, changePercent: 0, name: null, currency: "USD" },
+    });
+    for (const p of quoted) {
+      expect(p.priced).toBe(false);
+      expect(p.lastPrice).toBeNull();
+      expect(p.unrealized).toBe(0);
+    }
+    expect(snapshot.totals.unrealized).toBe(0);
+    expect(snapshot.totals.unpricedCount).toBe(2);
+    expect(snapshot.totals.marketValue).toBe(2000); // both at cost, not 0
+    expect(quoted.every((p) => p.dayChangePct === 0)).toBe(true);
   });
 
   it("handles an empty portfolio without NaNs", () => {

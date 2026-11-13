@@ -107,7 +107,9 @@ export default function DashboardPage() {
 
   const totals = portfolio?.snapshot.totals;
   const positions = portfolio?.quoted ?? [];
-  const movers = [...positions].sort((a, b) => b.dayChangePct - a.dayChangePct);
+  // Only positions with a live quote have a day move; an unquoted one would sit
+  // in the list at 0.00 % and read as "unchanged".
+  const movers = positions.filter((p) => p.priced).sort((a, b) => b.dayChangePct - a.dayChangePct);
   const topGainers = movers.slice(0, 4);
   const topLosers = movers.slice(-4).reverse();
 
@@ -163,7 +165,7 @@ export default function DashboardPage() {
     symbol: p.symbol,
     name: portfolio?.quotes[p.symbol]?.name ?? null,
     held: p.shares > 0,
-    shares: p.shares, avgCost: p.avgCost, costBasis: p.costBasis, marketValue: p.marketValue,
+    shares: p.shares, avgCost: p.avgCost, costBasis: p.costBasis, marketValue: p.marketValue, priced: p.priced,
     unrealized: p.unrealized, unrealizedPct: p.unrealizedPct, realized: p.realized, dividends: p.dividends,
     weightPct: p.weightPct, firstBuyDate: p.firstBuyDate,
     lastPrice: p.lastPrice, prevClose: p.prevClose, dayChange: p.dayChange, dayChangePct: p.dayChangePct,
@@ -252,7 +254,9 @@ export default function DashboardPage() {
             {kpi(
               "Day Change",
               fmt(totals?.dayChange ?? 0),
-              undefined,
+              (totals?.unpricedCount ?? 0) > 0
+                ? <span className="text-[var(--warning)]">{totals?.unpricedCount} holding(s) at cost — no quote</span>
+                : undefined,
               (totals?.dayChange ?? 0) >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]",
               () => openMetric("Day Change", "Each holding's move today, vs yesterday's close", [
                 { heading: "By position", rows: positions.map((p) => ({ label: `${p.symbol} (${pct(p.dayChangePct)})`, value: fmt(p.dayChange), tone: toneOf(p.dayChange) })) },
@@ -311,7 +315,10 @@ export default function DashboardPage() {
                       <div className="flex-1 min-w-16 h-2 rounded-full overflow-hidden bg-[var(--card-border)]">
                         <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, p.weightPct)}%` }} />
                       </div>
-                      <span className="w-24 text-right tabular-nums">{fmt(p.marketValue)}</span>
+                      <span className="w-24 text-right tabular-nums" title={p.priced ? undefined : "No live quote — valued at cost"}>
+                        {fmt(p.marketValue)}
+                        {!p.priced && <span className="text-[10px] text-[var(--muted)]"> at cost</span>}
+                      </span>
                       <span className={`w-20 text-right tabular-nums ${p.unrealized >= 0 ? "text-[var(--success)]" : "text-[var(--danger)]"}`}>
                         {pct(p.unrealizedPct)}
                       </span>
